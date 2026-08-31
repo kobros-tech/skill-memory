@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skill-memory"
+version = "0.1.0"
+description = "Small standalone continual skill-learning core with dynamic skill memory"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+dev = ["pytest>=7", "jupyter", "nbformat", "nbconvert", "ipykernel"]
+
+[tool.setuptools.packages.find]
+include = ["skill_memory*", "controller*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
