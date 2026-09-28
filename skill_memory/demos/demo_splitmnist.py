@@ -1,279 +1,52 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
 
-"""SplitMNIST Skill Memory experiment with ML evaluation.
+"""Sequential Skill Memory experiment on SplitMNIST (downloads the data).
 
-The public SkillMemoryStrategy owns the complete experiment lifecycle:
+Example::
 
-* Skill Memory training
-* frozen per-class evaluation memory
-* independent ML evaluator training
-* anonymous x -> y evaluation through Avalanche's normal eval() lifecycle
-* accuracy/loss tracking
-* forgetting metrics
+    python -m skill_memory.demos.demo_splitmnist --update-mode refresh \
+        --class-train-epochs 1 --seed 0 --diagnose
 
-The demo only configures SplitMNIST and the strategy, then reports results.
+Same flags and output format as ``demo_cifar100`` (see its docstring).
 """
 
 from __future__ import annotations
-
-import argparse
 
 import numpy as np
 import torch
 from avalanche.benchmarks.classic import SplitMNIST
 from avalanche.models import SimpleMLP
-from torch import nn
 
-from skill_memory import SkillMemoryStrategy
-from skill_memory.diagnostics import (
-    diagnose_evaluator_probe,
-    evaluate_class_oracle,
-    evaluate_skill_memory,
-    timing_report,
-)
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Train and evaluate Skill Memory on SplitMNIST."
-    )
-    parser.add_argument("--dataset-root", default="data")
-    parser.add_argument("--download-only", action="store_true")
-    parser.add_argument("--n-experiences", type=int, default=5)
-    parser.add_argument(
-        "--eval-memory-per-class",
-        type=int,
-        default=20,
-        help="Frozen evaluation examples retained per class.",
-    )
-    parser.add_argument(
-        "--eval-epochs",
-        type=int,
-        default=1,
-        help="Number of epochs used by the independent ML evaluator.",
-    )
-    parser.add_argument("--train-epochs", type=int, default=1)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--eval-batch-size", type=int, default=64)
-    parser.add_argument("--learning-rate", type=float, default=0.01)
-    parser.add_argument("--eval-learning-rate", type=float, default=0.01)
-    parser.add_argument("--probe-behavior-weight", type=float, default=0.5)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-skills", type=int, default=20)
-    parser.add_argument(
-        "--eval-routing",
-        choices=("none", "probe"),
-        default="none",
-        help=(
-            "Evaluation routing: independent evaluator only or anonymous "
-            "Skill Memory probe."
-        ),
-    )
-    parser.add_argument(
-        "--diagnose",
-        action="store_true",
-        help=(
-            "Run optional Skill Memory diagnostics (class oracle and "
-            "anonymous probe). Diagnostics never affect production evaluation."
-        ),
-    )
-    return parser.parse_args()
+from skill_memory.demos._common import build_parser, check_args, run_experiment
 
 
 def main() -> None:
-    args = parse_args()
-
+    args = build_parser(
+        "Sequential Skill Memory experiment on SplitMNIST.",
+        default_experiences=5,
+        default_epochs=1,
+    ).parse_args()
+    check_args(args)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    print(f"Preparing SplitMNIST dataset... (root: {args.dataset_root})")
     benchmark = SplitMNIST(
         n_experiences=args.n_experiences,
         seed=args.seed,
         dataset_root=args.dataset_root,
     )
-
-    print("=== SplitMNIST Skill Memory experiment ===")
-    print("Training method: Skill Memory")
-    print("Evaluation method: independent anonymous ML evaluator")
-    print(f"Evaluation routing: {args.eval_routing}")
-    print(f"Diagnostics: {'enabled' if args.diagnose else 'disabled'}")
-    print(f"Device: {device}")
-    print(f"Experiences: {len(benchmark.train_stream)}")
-    print(
-        "Evaluation memory per class:",
-        args.eval_memory_per_class,
-    )
-
-    for index, experience in enumerate(benchmark.train_stream):
-        print(
-            f"  Exp {index}: "
-            f"classes={sorted(experience.classes_in_this_experience)} "
-            f"samples={len(experience.dataset)}"
-        )
-
     if args.download_only:
         print(f"SplitMNIST dataset prepared at {args.dataset_root}")
         return
-
-    # ------------------------------------------------------------------
-    # Main Skill Memory model.
-    # ------------------------------------------------------------------
-
-    model = SimpleMLP(num_classes=10).to(device)
-
-    # ------------------------------------------------------------------
-    # SkillMemoryStrategy owns:
-    #
-    #   1. Skill Memory training
-    #   2. evaluation-memory retention
-    #   3. independent ML evaluator
-    #   4. normal Avalanche evaluation lifecycle
-    #
-    # The evaluator receives only x at evaluation time and predicts y.
-    # No experience ID, task label, or skill ID is supplied.
-    # ------------------------------------------------------------------
-
-    strategy = SkillMemoryStrategy(
-        model=model,
-        optimizer=torch.optim.SGD(
-            model.parameters(),
-            lr=args.learning_rate,
-        ),
-        criterion=nn.CrossEntropyLoss(),
-        max_skills=args.max_skills,
-        train_mb_size=args.batch_size,
-        train_epochs=args.train_epochs,
-        eval_mb_size=args.eval_batch_size,
-        evaluator_model_factory=lambda: SimpleMLP(
-            num_classes=10,
-            input_size=28 * 28,
-            hidden_size=2048,
-            hidden_layers=1,
-            drop_rate=0.1,
-        ),
-        eval_memory_per_class=args.eval_memory_per_class,
-        eval_epochs=args.eval_epochs,
-        eval_learning_rate=args.eval_learning_rate,
-        probe_seed=args.seed,
-        device=device,
-        diagnose=args.diagnose,
-        verbose=True,
-        eval_routing=args.eval_routing,
-        probe_behavior_weight=args.probe_behavior_weight,
+    run_experiment(
+        args,
+        title="SplitMNIST",
+        benchmark=benchmark,
+        make_model=lambda device: SimpleMLP(num_classes=10).to(device),
+        num_classes=10,
     )
-
-    # ------------------------------------------------------------------
-    # Complete Avalanche lifecycle.
-    #
-    # Training:
-    #     strategy.train(experience)
-    #
-    # Evaluation:
-    #     strategy.eval(benchmark.test_stream)
-    #
-    # The ML evaluator is trained automatically on all accumulated frozen
-    # evaluation memory before the normal Avalanche evaluation pass.
-    # ------------------------------------------------------------------
-
-    for experience_index, experience in enumerate(benchmark.train_stream):
-        print()
-        print(f"========== Training experience {experience_index} ==========")
-        print(
-            "Classes:",
-            sorted(int(class_id) for class_id in experience.classes_in_this_experience),
-        )
-
-        # Normal Avalanche training lifecycle.
-        strategy.train(experience)
-
-        print(f"========== Evaluation after experience {experience_index} ==========")
-
-        # Normal Avalanche evaluation lifecycle.
-        strategy.eval(benchmark.test_stream)
-
-        if args.diagnose:
-            print("---------- Diagnostics ----------")
-            class_oracle = evaluate_class_oracle(
-                strategy.model,
-                strategy.skill_memory_plugin,
-                benchmark.test_stream,
-                experience_index,
-                num_classes=10,
-                batch_size=args.eval_batch_size,
-                device=device,
-                diagnose=args.diagnose,
-            )
-            direct_probe = evaluate_skill_memory(
-                strategy.model,
-                strategy.skill_memory_plugin,
-                benchmark.test_stream,
-                experience_index,
-                num_classes=10,
-                routing="probe",
-                batch_size=args.eval_batch_size,
-                device=device,
-                diagnose=args.diagnose,
-            )
-            evaluator_probe = diagnose_evaluator_probe(
-                strategy,
-                benchmark.test_stream,
-                batch_size=args.eval_batch_size,
-                diagnose=args.diagnose,
-            )
-            print(
-                "class_oracle_mean_accuracy=",
-                f"{np.mean([item['accuracy'] for item in class_oracle.values()]):.4f}",
-            )
-            print(
-                "direct_probe_mean_accuracy=",
-                f"{np.mean([item['accuracy'] for item in direct_probe.values()]):.4f}",
-            )
-            print(
-                "evaluator_probe_routing_accuracy=",
-                f"{evaluator_probe['probe_routing_accuracy']:.4f}",
-            )
-            print(
-                "evaluator_probe_mean_confidence=",
-                f"{evaluator_probe['probe_mean_confidence']:.4f}",
-            )
-            print(
-                "evaluator_probe_mean_margin=",
-                f"{evaluator_probe['probe_mean_margin']:.4f}",
-            )
-            for bucket, stats in timing_report(strategy).items():
-                print(
-                    f"timing[{bucket}]: total={stats['total_seconds']:.2f}s "
-                    f"calls={stats['calls']} mean={stats['mean_seconds']:.3f}s"
-                )
-
-    # ------------------------------------------------------------------
-    # Final results.
-    # ------------------------------------------------------------------
-
-    results = strategy.results()
-
-    print()
-    print("=== Summary ===")
-
-    print(
-        "mean_final_accuracy=",
-        f"{results['mean_final_accuracy']:.4f}",
-    )
-    print(
-        "mean_final_loss=",
-        f"{results['mean_final_loss']:.4f}",
-    )
-
-    print("final_class_accuracy:")
-    for class_id, accuracy in results["final_class_accuracy"].items():
-        print(f"  class {class_id}: {accuracy:.4f}")
-
-    print("final_class_loss:")
-    for class_id, loss in results["final_class_loss"].items():
-        print(f"  class {class_id}: {loss:.4f}")
 
 
 if __name__ == "__main__":

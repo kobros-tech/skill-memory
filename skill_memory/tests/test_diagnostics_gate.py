@@ -30,9 +30,7 @@ GATED_FUNCTIONS = [
     diag.route_probe_logits,
     diag.evaluate_skill_memory,
     diag.evaluate_class_oracle,
-    diag.diagnose_evaluator_probe,
-    diag.routing_rank_diagnostics,
-    diag.class_index_alignment_report,
+    diag.replay_provenance_report,
 ]
 
 
@@ -53,13 +51,9 @@ def _strategy(**kwargs):
         model=model,
         optimizer=torch.optim.SGD(model.parameters(), lr=0.05),
         criterion=torch.nn.CrossEntropyLoss(),
-        evaluator_model_factory=lambda: SimpleMLP(
-            input_size=6, hidden_size=8, num_classes=2
-        ),
-        eval_memory_per_class=5,
-        eval_epochs=1,
+        memory_per_class=5,
         train_mb_size=16,
-        train_epochs=1,
+        class_train_epochs=1,
         eval_mb_size=16,
         verbose=False,
         **kwargs,
@@ -76,9 +70,6 @@ def test_diagnose_is_a_required_keyword_with_no_default(fn):
 
 
 def test_gated_functions_refuse_diagnose_false():
-    with pytest.raises(RuntimeError, match="diagnose=True"):
-        diag.routing_rank_diagnostics([], diagnose=False)
-
     with pytest.raises(RuntimeError, match="diagnose=True"):
         diag.find_best_routing_skill([torch.zeros(1, 2)], [{}], [{0}], diagnose=False)
 
@@ -139,16 +130,13 @@ def test_production_modules_do_not_import_diagnostic_functions():
     """Only two production files may import from `skill_memory.diagnostics`.
 
     `TimingAccumulator` (an inert, flag-gated class) is imported by the two
-    places that own one; `fingerprint_routing` imports the two alignment
-    reports, which it only ever calls inside its own `if self.diagnose:`
-    branches. Any other import from the diagnostics package inside
-    production code is a leak path and should fail here.
+    places that own one; it only records when ``diagnose`` is set. Any other
+    import from the diagnostics package inside production code is a leak path
+    and should fail here.
     """
     allowed = {
         ("cl/skill_memory_plugin.py", "TimingAccumulator"),
         ("strategy.py", "TimingAccumulator"),
-        ("evaluation/fingerprint_routing.py", "class_index_alignment_report"),
-        ("evaluation/fingerprint_routing.py", "routing_rank_diagnostics"),
     }
     found = set()
     for path in PACKAGE_ROOT.rglob("*.py"):

@@ -1,67 +1,60 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
 
-"""Every diagnostic in this package, in one place, gated by ``diagnose=True``.
+"""Opt-in diagnostics -- never part of ``strategy.eval()``.
 
-**Everything here is deliberately not part of `strategy.eval()`.**
-Production evaluation always goes through the independent ML evaluator
-(:mod:`skill_memory.evaluation.independent_evaluator`), which never sees a
-true label before making a prediction. This package exists to answer a
-different kind of question -- *could Skill Memory's own stored skills
-reproduce that accuracy?*, *where did the time in this run actually go?*,
-*does each skill's own classifier still have a column for every class it
-owns?* -- using tools (an oracle label, a per-skill forward-pass sweep, a
-raw-weight inspection) that would be a leak, or an unbudgeted cost, if
-they ran automatically.
+Production evaluation (``CLEvaluationPlugin``) never uses a true label. The
+tools here answer *other* questions, and some of them would leak ground
+truth or cost unbudgeted time if they ran implicitly:
 
-**The rule, enforced, not just documented:** every public function in
-this package takes ``diagnose`` as a required keyword argument with no
-default. There are two variants of what it checks, matched to what each
-function actually risks:
+=============================  ==============================================
+function                       question it answers
+=============================  ==============================================
+``evaluate_class_oracle``      upper bound: route every sample with its TRUE
+                               label (a leak by construction)
+``evaluate_skill_memory``      accuracy of the stored skills with oracle or
+                               anonymous ``"probe"`` routing
+``replay_provenance_report``   which historical data did each training call
+                               consume? (checks the replay invariants)
+``timing_report``              where did the run time go?
+``audit_split_overlap`` ...    exact-content train/test overlap (diagnostic,
+                               not a proof of no leakage)
+=============================  ==============================================
 
-- Functions that could use a true label, or that always cost real
-  forward-pass time regardless of how anything was configured
-  (:func:`find_best_routing_skill`, :func:`route_probe_logits`,
-  :func:`evaluate_skill_memory`, :func:`evaluate_class_oracle`,
-  :func:`diagnose_evaluator_probe`, :func:`routing_rank_diagnostics`,
-  :func:`class_index_alignment_report`) require the caller to pass
-  ``diagnose=True`` at that exact call site, regardless of how the
-  strategy involved was built. A leak here can never be explained away
-  as "the strategy happened to be built the wrong way" -- the call
-  itself has to say so.
-- :func:`timing_report` and :func:`reset_timing` instead check
-  ``strategy.diagnose`` -- since a `SkillMemoryStrategy` built with
-  ``diagnose=False`` (the default) never records timing at all
-  (`TimingAccumulator.track` is then a true no-op, not just an unread
-  one), there is no separate leak to gate against; the check exists so
-  the failure mode is a clear error instead of a silently empty report.
-
-Auditing whether any diagnostic-only computation or ground truth could
-have reached a production number is therefore one grep for
-``diagnose=True`` across the codebase, not a review of every module that
-might have forgotten to check a flag.
+**The gate.** Every function that could use a label, or that always costs real
+forward passes, takes ``diagnose`` as a required keyword with no default and
+raises unless it is ``True`` -- so auditing whether a diagnostic could have
+reached a production number is one ``grep diagnose=True``. ``timing_report``
+and ``reset_timing`` instead check ``strategy.diagnose``, because a strategy
+built with ``diagnose=False`` records no timing at all.
 """
 
 from __future__ import annotations
 
-from .alignment import class_index_alignment_report, routing_rank_diagnostics
 from .evaluation import (
-    diagnose_evaluator_probe,
     evaluate_class_oracle,
     evaluate_skill_memory,
 )
-from .routing import find_best_routing_skill, route_probe_logits
+from .leakage import (
+    assert_no_split_overlap,
+    audit_split_overlap,
+    audit_strategy_leakage,
+)
+from .replay import replay_provenance_report
+from .routing import RoutingResult, find_best_routing_skill, route_probe_logits
 from .timing import TimingAccumulator, reset_timing, timing_report
 
 __all__ = [
+    "RoutingResult",
     "TimingAccumulator",
-    "class_index_alignment_report",
-    "diagnose_evaluator_probe",
+    "assert_no_split_overlap",
+    "audit_split_overlap",
+    "audit_strategy_leakage",
     "evaluate_class_oracle",
     "evaluate_skill_memory",
     "find_best_routing_skill",
+    "replay_provenance_report",
     "reset_timing",
     "route_probe_logits",
-    "routing_rank_diagnostics",
     "timing_report",
 ]

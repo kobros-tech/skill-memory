@@ -1,36 +1,150 @@
 name: pytest
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
-      - "refactor/**"
-      - "fix/**"
+    branches: [main]
   pull_request:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: pre-commit/action@v3.0.1
+
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.10"
+            torch-pin: ""
+            torchvision-pin: ""
+            numpy-pin: ""
+            jax-pin: ""
+            jaxlib-pin: ""
+
+          - python-version: "3.11"
+            torch-pin: ""
+            torchvision-pin: ""
+            numpy-pin: ""
+            jax-pin: ""
+            jaxlib-pin: ""
+
+          - python-version: "3.12"
+            torch-pin: ""
+            torchvision-pin: ""
+            numpy-pin: ""
+            jax-pin: ""
+            jaxlib-pin: ""
+
+          # Oldest torch line exercised in CI (torch.func / vmap paths).
+          #
+          # Avalanche imports qpsolvers, which imports its JAX-backed solver
+          # integration. This compatibility job therefore pins JAX/JAXLIB
+          # as well as NumPy: newer JAX releases may use NumPy 2-only APIs
+          # such as np.dtypes.StringDType.
+          #
+          # torch and torchvision MUST be pinned as a pair: a newer
+          # torchvision calls torch.library.register_fake (torch>=2.4) at
+          # import time and breaks `import avalanche` otherwise.
+          #
+          # Every matrix requirement is quoted below: an unquoted `numpy<2`
+          # is parsed by the shell as a redirect from a file "2", and an
+          # unquoted `torch==2.3.*` can be glob-expanded.
+          - python-version: "3.11"
+            torch-pin: "torch==2.3.*"
+            torchvision-pin: "torchvision==0.18.*"
+            numpy-pin: "numpy<2"
+            jax-pin: "jax==0.4.34"
+            jaxlib-pin: "jaxlib==0.4.34"
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package and dev dependencies
+        if: matrix.torch-pin == ''
+        run: pip install -e ".[dev]"
+
+      # Install the complete compatibility stack in ONE pip invocation.
+      #
+      # This keeps the resolver aware of the package, Torch, torchvision,
+      # NumPy, JAX and JAXLIB constraints simultaneously. In particular,
+      # Avalanche -> qpsolvers -> JAX means JAX must be constrained when
+      # this job intentionally exercises NumPy 1.x.
+      - name: Install package with pinned compatibility stack
+        if: matrix.torch-pin != ''
+        run: |
+          pip install \
+            -e ".[dev]" \
+            "${{ matrix.torch-pin }}" \
+            "${{ matrix.torchvision-pin }}" \
+            "${{ matrix.numpy-pin }}" \
+            "${{ matrix.jax-pin }}" \
+            "${{ matrix.jaxlib-pin }}"
+
+      - name: Verify imports
+        run: |
+          pip list 2>/dev/null | grep -i -E "^(torch|torchvision|numpy|jax|jaxlib|avalanche-lib|qpsolvers) " || true
+          pip check || true
+          python -c "import torch, torchvision, numpy; print('torch', torch.__version__, 'torchvision', torchvision.__version__, 'numpy', numpy.__version__)"
+          python -c "import jax, jaxlib; print('jax', jax.__version__, 'jaxlib', jaxlib.__version__)"
+          python -c "import avalanche; print('avalanche import ok')"
+
+      - name: Run tests (offline; no dataset downloads)
+        run: |
+          # The golden regression is the reference numeric benchmark for the
+          # current supported Torch stack. The pinned Torch 2.3 job is a
+          # compatibility check: it must exercise the package, but its older
+          # kernels legitimately produce different floating-point weights and
+          # calibrated per-class accuracies. Keep the structural/unit tests in
+          # that job without turning cross-version drift into a false failure.
+          if [ -n "${{ matrix.torch-pin }}" ]; then
+            python -m pytest -q --ignore=skill_memory/tests/test_golden_regression.py
+          else
+            python -m pytest -q
+          fi
+
+  replay-ablation:
+    # The offline replay/refresh comparison must keep running and keep its
+    # audit clean (the 'viol' column / exit status is checked by the tests).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Install package and test dependencies
-        run: python -m pip install -e ".[dev]"
+      - run: pip install -e .
 
-      - name: Lint
+      - name: Run the replay ablation demo
         run: |
-          python -m ruff check .
-          python -m ruff format --check .
+          python -m skill_memory.demos.demo_replay_ablation --seeds 0 1 --json ablation.json \
+            | tee ablation.txt
+          python - <<'PY'
+          import json
 
-      - name: Run unit tests
-        run: python -m pytest -q
+          rows = json.load(open("ablation.json"))
+          assert all(r["violations"] == 0 for r in rows), rows
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: replay-ablation
+          path: |
+            ablation.txt
+            ablation.json

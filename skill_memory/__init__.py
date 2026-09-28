@@ -1,72 +1,31 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
 
-"""Class-level probe-based Skill Memory for Avalanche.
+"""Skill Memory: continual learning with one verifier skill per class group.
 
-Diagnostics (anonymous-routing evaluation, oracle-routed evaluation,
-timing, and per-skill alignment reports) live entirely in
-`skill_memory.diagnostics` and are never imported here -- see that
-package's docstring for why, and for the `diagnose=True` contract every
-function there enforces.
+Typical use::
+
+    from skill_memory import SkillMemoryStrategy
+
+    strategy = SkillMemoryStrategy(model=..., optimizer=..., criterion=...,
+                                   update_mode="replay")
+    for experience in benchmark.train_stream:
+        strategy.train(experience)
+    results = strategy.eval(benchmark.test_stream)
+
+Optional, opt-in diagnostics live in :mod:`skill_memory.diagnostics`.
 """
 
-from .cl.decision import find_best_skill
 from .cl.skill_memory_plugin import SkillMemoryPlugin
 from .cl.skill_registry import ClassRecord, ExperienceClassMap, SkillMemory
-from .evaluation.behavior import (
-    BehaviorFingerprintCache,
-    ClassBehaviorRecord,
-    compare_binary_behavior,
-    identify_binary_behavior,
-    reverse_engineer_scores_from_weights,
-    reverse_engineer_y,
-    reverse_engineer_y_from_weights,
-)
-from .evaluation.fingerprint_routing import PersistentFingerprintSkillMemoryPlugin
-from .evaluation.independent_evaluator import (
-    EvaluationMemory,
-    EvaluationMemoryPlugin,
-    MLEvaluationPlugin,
-    aggregate_experience_metrics,
-    build_evaluator,
-    compute_class_forgetting,
-    compute_peak_class_forgetting,
-    consolidate_evaluation_memory,
-    evaluate_model_by_class,
-    make_loader,
-    train_evaluator,
-)
-from .evaluation.reverse_engineering import CandidateParameters, NormalMLReverseEngineer
-from .evaluation.routing import RoutingResult
+from .evaluation.cl_evaluator import CLEvaluationPlugin
 from .strategy import SkillMemoryStrategy
 
 __all__ = [
-    "BehaviorFingerprintCache",
-    "CandidateParameters",
+    "CLEvaluationPlugin",
     "ClassRecord",
-    "ClassBehaviorRecord",
-    "EvaluationMemory",
-    "EvaluationMemoryPlugin",
-    "MLEvaluationPlugin",
     "ExperienceClassMap",
-    "RoutingResult",
     "SkillMemory",
     "SkillMemoryPlugin",
-    "PersistentFingerprintSkillMemoryPlugin",
-    "NormalMLReverseEngineer",
-    "aggregate_experience_metrics",
-    "build_evaluator",
-    "compare_binary_behavior",
-    "compute_class_forgetting",
-    "compute_peak_class_forgetting",
-    "consolidate_evaluation_memory",
-    "evaluate_model_by_class",
-    "identify_binary_behavior",
-    "make_loader",
-    "reverse_engineer_scores_from_weights",
-    "reverse_engineer_y",
-    "reverse_engineer_y_from_weights",
-    "find_best_skill",
-    "train_evaluator",
     "SkillMemoryStrategy",
 ]
