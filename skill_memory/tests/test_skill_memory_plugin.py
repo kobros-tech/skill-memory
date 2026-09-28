@@ -12,7 +12,6 @@ from avalanche.training import Naive
 from torch import nn
 from torch.utils.data import TensorDataset
 
-from skill_memory.cl import decision as decision_module
 from skill_memory.cl.skill_memory_plugin import SkillMemoryPlugin
 
 
@@ -142,70 +141,81 @@ def test_diagnose_false_does_not_call_perf_counter(monkeypatch):
     strategy.train(benchmark.train_stream[0])
 
 
-def test_safety_check_verifies_all_candidates_by_default(monkeypatch):
+def test_cl_update_modes_select_expected_historical_replay_budget(monkeypatch):
+    """Native update modes replace the old demo monkey-patch semantics."""
+    from types import SimpleNamespace
+
+    captured = []
+
     class FakeMemory:
         def slots(self):
-            return set(range(6))
+            return {0}
 
-        def state(self, slot):
+        def state(self, skill):
             return {}
+
+        def metadata(self, skill):
+            return {}
+
+        def store(self, skill, state, metadata):
+            return None
 
     class FakeClassMap:
         def classes_for_skill(self, skill):
-            return {skill}
+            return {0}
 
-    new_x = torch.tensor([[99.0]])
-    new_y = torch.tensor([0])
-    old_x = torch.tensor([[0.0]])
-    old_y = torch.tensor([0])
+    experience = SimpleNamespace(
+        classes_in_this_experience=[1],
+        dataset=TensorDataset(
+            torch.randn(4, 4),
+            torch.ones(4, dtype=torch.long),
+        ),
+    )
+    strategy = SimpleNamespace(model=object(), optimizer=None)
+
+    def fake_train(*args, **kwargs):
+        captured.append(kwargs["historical_samples_per_class"])
+        return (
+            torch.randn(2, 4),
+            torch.tensor([0, 1], dtype=torch.long),
+        )
 
     monkeypatch.setattr(
-        decision_module,
-        "probe_class",
-        lambda *args, **kwargs: (new_x, new_y),
+        "skill_memory.cl.skill_memory_plugin.apply_skill_state_exact",
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
-        decision_module,
-        "_first_experience_with_class",
-        lambda *args, **kwargs: object(),
+        "skill_memory.cl.skill_memory_plugin.prepare_for_classes",
+        lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
-        decision_module,
-        "_probe_class_across",
-        lambda *args, **kwargs: (old_x, old_y),
+        "skill_memory.cl.skill_memory_plugin.train_skill_on_domain",
+        fake_train,
     )
 
-    def fake_evaluate_state(
-        _model,
-        state,
-        x,
-        y,
-        loss_fn,
-        experience,
-        seed=None,
+    for mode, expected in (
+        ("replay", None),
+        ("small_replay", 5),
     ):
-        del state, y, loss_fn, experience
-        if x.item() == 99.0:
-            skill = len(results_seen)
-            results_seen.append(skill)
-            score = 1.0 - 0.01 * skill
-            return 0.0, score, score
-        return 0.0, 0.8, 0.8
+        plugin = SkillMemoryPlugin(
+            memory=FakeMemory(),
+            class_train_mode="binary_one_vs_rest",
+            cl_update_mode=mode,
+            verbose=False,
+        )
+        plugin.class_map = FakeClassMap()
+        plugin._new_skills_this_experience = set()
+        plugin._reset_optimizer = lambda *args, **kwargs: None
+        plugin._update_binary_skill_domains(strategy, experience, 1)
+        assert captured[-1] == expected
 
-    results_seen = []
-    monkeypatch.setattr(decision_module, "evaluate_state", fake_evaluate_state)
-
-    strategy = SimpleNamespace(model=nn.Linear(1, 1))
-    results = decision_module.score_class_against_skills(
-        strategy,
-        object(),
-        7,
-        FakeMemory(),
-        FakeClassMap(),
-        probe_batch_size=1,
-        probe_batches=1,
-        probe_seed=0,
-        seen_experiences=[object()],
+    plugin = SkillMemoryPlugin(
+        memory=FakeMemory(),
+        class_train_mode="binary_one_vs_rest",
+        cl_update_mode="new_class",
+        verbose=False,
     )
-
-    assert len(results) == 6
+    plugin.class_map = FakeClassMap()
+    plugin._new_skills_this_experience = set()
+    plugin._update_binary_skill_domains(strategy, experience, 1)
+    assert captured == [None, 5]

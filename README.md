@@ -160,6 +160,8 @@ skill_memory/
 │   ├── evaluation.py              # evaluate_class_oracle, evaluate_skill_memory, diagnose_evaluator_probe
 │   ├── alignment.py               # routing_rank_diagnostics, class_index_alignment_report
 │   ├── timing.py                  # TimingAccumulator, timing_report, reset_timing
+│   ├── leakage.py                 # audit_split_overlap: content-level train/test overlap audit
+│   ├── old_scores.py              # measure_old_class_scores: on-demand old-class probability scores
 │   └── _gate.py                   # require_diagnose: the one shared enforcement point
 ├── cl/                            # Skill Memory itself: what to freeze, when, and why
 │   ├── skill_registry.py         # SkillMemory (frozen state store) + ExperienceClassMap (bookkeeping)
@@ -175,10 +177,13 @@ skill_memory/
 │   ├── fingerprint_routing.py     # PersistentFingerprintSkillMemoryPlugin (cached anonymous routing)
 │   └── global_fingerprint_refresh.py  # Drift detection that triggers a fingerprint recompute
 ├── utils/
-│   └── probing.py                 # Dataset probing, exact state application, IncrementalClassifier helpers
+│   ├── probing.py                 # Dataset probing, exact state application, FunctionalStateCache, evaluate_states_batch
+│   └── protocol_guard.py          # Cheap runtime train/test protocol guards (strict_protocol)
 ├── demos/
 │   └── demo_splitmnist.py  # End-to-end SplitMNIST example (see below)
-└── tests/                          # 96 tests; see "Development"
+├── benchmarks/
+│   └── stage1_batching.py  # Sequential vs. batch_stage1 runtime comparison
+└── tests/                          # 171 tests; see "Development"
 ```
 
 ## Installation
@@ -364,6 +369,15 @@ match is a place where ground truth or diagnostic cost could enter.
   probing in `decision.py` (which applies stored weights functionally via
   `torch.func.functional_call`, so it never mutates — or needs a copy of —
   the live model) ever calls `.backward()` using a stored skill's weights.
+- **Training, evaluation memory and test data stay separate.** Evaluation
+  memory is drawn only from the experience just trained; the safety stage
+  probes only experiences already trained on; test labels are used only
+  after predictions are made. `strict_protocol=True` (default) turns the
+  common misuses into `ProtocolViolation`, and
+  [`tests/test_leakage.py`](skill_memory/tests/test_leakage.py) tries to break
+  each rule. For a content-level check of your own split, run
+  `skill_memory.diagnostics.audit_strategy_leakage(strategy, test_stream,
+  diagnose=True)`.
 - **Diagnostics never leak into production metrics.** Everything in
   `skill_memory.diagnostics` requires an explicit `diagnose=True` at the
   call site and is absent from `strategy.eval()`'s return value.

@@ -106,9 +106,27 @@ higher-level explanation:
 - `score_class_against_skills` is two-staged on purpose: stage 1
   (`evaluate_state` against the new class) runs for *every* stored skill,
   cheaply — one functional forward pass each, no model copies (see
-  above); stage 2 checks old classes for every candidate by default.
-  `max_safety_candidates` can be set to a finite value as an explicit
-  performance approximation when the full safety check is too expensive.
+  above); stage 2 verifies old classes for the `max_safety_candidates`
+  strongest candidates (**default 5**; `None` verifies every skill
+  exactly). A finite cap is an explicit performance approximation: it can
+  miss a reusable lower-ranked skill.
+- Stage 2 is judged on old-class **accuracy only**, so it uses the
+  accuracy-only `evaluate_state_accuracy` (no loss, no softmax) and
+  **short-circuits**: a candidate's old classes are checked one at a time and
+  checking stops at the first class with `acc <= chance + forgetting_margin`.
+  That skill is already unsafe under `find_best_skill`, so the REUSE/SCRATCH
+  outcome is unchanged; only its `old_metrics` list is partial
+  (`safety_complete=False`).
+- The old-class probability *score* (`old_score`) is not part of the decision
+  path any more. Use `skill_memory.diagnostics.measure_old_class_scores(
+  strategy, skill, diagnose=True)` to compute it on demand.
+- `DecisionProbeCache` (one per plugin) makes repeated probing cheaper
+  without changing any result: expanded functional skill states are cached
+  per experience (keyed by the identity of the stored snapshot, so a
+  re-stored skill is never served stale), and seeded old-class probe batches
+  are drawn once per *pool of experiences that contain the class*. Unseeded
+  runs (`probe_seed=None`) are never cached, because their probes are random
+  by design.
 - `_strongest_candidates` finds the largest gap in a sorted metric
   ranking rather than a fixed threshold, so the "how much better than the
   runner-up does a candidate need to be" question doesn't need its own
@@ -168,3 +186,56 @@ minutes on CPU.
    `test_production_modules_do_not_import_diagnostic_functions` and say why
    in the docstring — the point of that test is that this list stays tiny
    and deliberate.
+
+## Protocol guards and leakage audit
+
+Two layers, deliberately separate:
+
+- **Runtime guards** (`utils/protocol_guard.py`, on by default via
+  `strict_protocol=True`, constant time): training on a `test`-stream
+  experience, evaluating on a `train`-stream experience, evaluating on a
+  dataset object Skill Memory already trained on, or capturing evaluation
+  memory for classes the source experience doesn't declare all raise
+  `ProtocolViolation`. These are name/identity checks; they cannot see a
+  test split that contains *copies* of training samples.
+- **Content audit** (`diagnostics/leakage.py`, needs `diagnose=True`):
+  `audit_split_overlap` / `audit_strategy_leakage` / `assert_no_split_overlap`
+  hash the actual tensors and count exact duplicates between the test stream
+  and the evaluation memory / training data. Near-duplicates and random
+  augmentation inside `__getitem__` defeat it — an empty audit is evidence,
+  not proof.
+
+`tests/test_leakage.py` exercises both by *trying to break the protocol*:
+poisoned datasets that raise on any premature read of future or wrong-split
+data, bit-identical model outputs under swapped test labels, probing side
+effects (stored skills, live model, global RNG), and end-to-end equality
+between the optimized and reference paths.
+
+## Stage-1 batching (`batch_stage1`)
+
+Stage 1 (new-class compatibility) scores *every* stored skill and, unlike
+stage 2, has no cap -- it is the part of decision time that keeps growing as
+skills accumulate. `batch_stage1=True` (default `False`) evaluates it via
+`skill_memory.utils.probing.evaluate_states_batch` instead of one
+`evaluate_state` call per skill:
+
+- Skills are grouped by `_param_shape_signature` -- the shape *and* dtype of
+  every tensor in their expanded (post-growth) state. Skills captured at
+  different points of classifier growth can genuinely need different
+  `IncrementalClassifier` widths for the same probe (see that function's
+  docstring), so groups are computed, never assumed uniform.
+- Each group of 2+ same-shaped skills is stacked and run through one
+  `torch.vmap(functional_call)` call; a group of exactly 1 falls back to the
+  ordinary sequential call.
+- This is exact, not an approximation: same candidate skills, same expanded
+  states (the same `FunctionalStateCache` is used), same forward-pass math,
+  differing from the sequential path only by ordinary float32
+  matmul-reassociation noise.
+- **It is not a safe default.** Measured on CPU with both an MLP and a small
+  conv+BatchNorm backbone (`skill_memory/benchmarks/stage1_batching.py`), it
+  was consistently *slower* than the sequential loop (~0.4x-0.8x). GPU
+  benefit is plausible (this is the standard `torch.func` pattern for
+  evaluating many same-architecture models with different weights) but
+  unverified in this repository -- benchmark your own hardware before
+  enabling it, and use `stage1_chunk_size` if a run has memory headroom
+  concerns.

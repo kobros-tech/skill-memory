@@ -85,7 +85,6 @@ class ClassRecord:
     decision: str
     skill: int
     new_score: float = 0.0
-    old_score: float = 0.0
     old_accuracy: float = 0.0
     new_accuracy: float = 0.0
 

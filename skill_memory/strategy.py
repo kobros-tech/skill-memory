@@ -25,7 +25,6 @@ retained data after continual training.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -35,13 +34,13 @@ from avalanche.training.plugins import SupervisedPlugin
 from avalanche.training.plugins.evaluation import EvaluationPlugin
 from avalanche.training.templates import SupervisedTemplate
 
+from .cl.decision import DEFAULT_MAX_SAFETY_CANDIDATES
 from .cl.skill_memory_plugin import SkillMemoryPlugin
 from .cl.skill_registry import SkillMemory
+from .cl.training import VALID_CLASS_TRAIN_MODES
 from .diagnostics.timing import TimingAccumulator
-from .evaluation.independent_evaluator import (
-    EvaluationMemoryPlugin,
-    MLEvaluationPlugin,
-)
+from .evaluation.cl_evaluator import CLEvaluationPlugin
+from .evaluation.memory import EvaluationMemoryPlugin
 
 
 class SkillMemoryStrategy(SupervisedTemplate):
@@ -74,7 +73,7 @@ class SkillMemoryStrategy(SupervisedTemplate):
 
     #: Bucket name used with `self.timing` (see
     #: `skill_memory.diagnostics.timing_report`).
-    TIMING_EVALUATION = "independent_evaluator_and_test_evaluation"
+    TIMING_EVALUATION = "cl_evaluation"
 
     def __init__(
         self,
@@ -92,55 +91,54 @@ class SkillMemoryStrategy(SupervisedTemplate):
         probe_batch_size: int = 64,
         probe_batches: int = 5,
         probe_seed: int | None = None,
-        max_safety_candidates: int | None = None,
+        max_safety_candidates: int | None = DEFAULT_MAX_SAFETY_CANDIDATES,
         class_train_batch_size: int = 64,
+        class_train_mode: str = "multiclass",
+        validation_fraction: float = 0.2,
+        validation_seed: int = 0,
         reuse_is_mutable: bool = True,
         force_decision: str | None = None,
         eval_memory_per_class: int = 20,
+        skill_train_samples_per_class: int | None = None,
         eval_memory_seed: int = 0,
-        eval_epochs: int = 1,
-        eval_batch_size: int = 64,
-        eval_learning_rate: float = 0.01,
-        evaluator_model_factory: Callable[[], nn.Module],
         train_mb_size: int = 64,
         train_epochs: int = 1,
         eval_mb_size: int = 64,
         device: torch.device | str | None = None,
         verbose: bool = True,
-        eval_routing: str = "none",
-        probe_behavior_weight: float = 0.5,
+        cl_update_mode: str = "replay",
+        cl_replay_per_class: int = 5,
         diagnose: bool = False,
+        strict_protocol: bool = True,
+        binary_negative_pool=None,
+        batch_stage1: bool = False,
+        stage1_chunk_size: int | None = None,
     ) -> None:
         if eval_memory_per_class <= 0:
             raise ValueError("eval_memory_per_class must be positive")
 
+        if skill_train_samples_per_class is None:
+            skill_train_samples_per_class = eval_memory_per_class
+        if skill_train_samples_per_class <= 0:
+            raise ValueError("skill_train_samples_per_class must be positive")
+
         if train_epochs < 1:
             raise ValueError("train_epochs must be at least 1")
 
-        if eval_epochs < 1:
-            raise ValueError("eval_epochs must be at least 1")
-
-        if eval_batch_size < 1:
-            raise ValueError("eval_batch_size must be positive")
-
-        if eval_routing not in ("none", "probe"):
-            raise ValueError("eval_routing must be one of 'none' or 'probe'")
-
-        if not 0.0 <= probe_behavior_weight <= 1.0:
-            raise ValueError("probe_behavior_weight must be between 0 and 1")
+        if class_train_mode not in VALID_CLASS_TRAIN_MODES:
+            raise ValueError(
+                f"class_train_mode must be one of {VALID_CLASS_TRAIN_MODES}"
+            )
 
         if device is None:
             device = next(model.parameters()).device
         else:
             device = torch.device(device)
 
-        self.eval_epochs = eval_epochs
-        self.eval_batch_size = eval_batch_size
-        self.eval_learning_rate = eval_learning_rate
         self.verbose = verbose
-        self.eval_routing = eval_routing
+        self.cl_update_mode = cl_update_mode
+        self.cl_replay_per_class = int(cl_replay_per_class)
         self.train_epochs = train_epochs
-        self.probe_behavior_weight = float(probe_behavior_weight)
         self.diagnose = bool(diagnose)
         self.timing = TimingAccumulator(enabled=self.diagnose)
 
@@ -163,29 +161,34 @@ class SkillMemoryStrategy(SupervisedTemplate):
             max_safety_candidates=max_safety_candidates,
             class_train_epochs=train_epochs,
             class_train_batch_size=class_train_batch_size,
+            class_train_mode=class_train_mode,
+            samples_per_class=skill_train_samples_per_class,
+            validation_fraction=validation_fraction,
+            validation_seed=validation_seed,
             reuse_is_mutable=reuse_is_mutable,
             force_decision=force_decision,
             eval_memory_per_class=eval_memory_per_class,
             eval_memory_seed=eval_memory_seed,
             verbose=verbose,
             diagnose=self.diagnose,
+            strict_protocol=strict_protocol,
+            binary_negative_pool=binary_negative_pool,
+            cl_update_mode=cl_update_mode,
+            cl_replay_per_class=cl_replay_per_class,
+            batch_stage1=batch_stage1,
+            stage1_chunk_size=stage1_chunk_size,
         )
 
-        self.ml_evaluation_plugin = MLEvaluationPlugin(
+        self.cl_evaluation_plugin = CLEvaluationPlugin(
             memory_plugin=self.plugin,
-            model_factory=evaluator_model_factory,
-            epochs=eval_epochs,
-            batch_size=eval_batch_size,
-            learning_rate=eval_learning_rate,
-            seed=eval_memory_seed,
             verbose=verbose,
-            eval_routing=eval_routing,
-            probe_behavior_weight=probe_behavior_weight,
+            strict_protocol=strict_protocol,
         )
+        self.evaluation_plugin = self.cl_evaluation_plugin
 
         strategy_plugins: list[SupervisedPlugin] = [
             self.plugin,
-            self.ml_evaluation_plugin,
+            self.evaluation_plugin,
         ]
 
         if plugins:
@@ -216,18 +219,10 @@ class SkillMemoryStrategy(SupervisedTemplate):
     # ------------------------------------------------------------------
 
     def eval(self, exp_list, **kwargs):
-        """Run normal Avalanche evaluation and include ML evaluator results.
-
-        Timed as one bucket (`self.TIMING_EVALUATION`) because
-        `super().eval()` both trains the independent evaluator (see
-        `MLEvaluationPlugin.before_eval`) and runs the real Avalanche
-        evaluation loop over `exp_list` -- see
-        `skill_memory.diagnostics.timing_report` to read this back
-        alongside Skill Memory's own decision/training timings.
-        """
+        """Run normal Avalanche evaluation using stored Skill Memory states."""
         with self.timing.track(self.TIMING_EVALUATION):
             avalanche_results = super().eval(exp_list, **kwargs)
-        avalanche_results.update(self.ml_evaluation_plugin.results())
+        avalanche_results.update(self.evaluation_plugin.results())
         return avalanche_results
 
     # ------------------------------------------------------------------
@@ -235,8 +230,8 @@ class SkillMemoryStrategy(SupervisedTemplate):
     # ------------------------------------------------------------------
 
     def results(self) -> dict[str, Any]:
-        """Return the independent ML evaluation results."""
-        return self.ml_evaluation_plugin.results()
+        """Return the Skill Memory CL evaluation results."""
+        return self.evaluation_plugin.results()
 
     # ------------------------------------------------------------------
     # Public accessors
@@ -251,7 +246,3 @@ class SkillMemoryStrategy(SupervisedTemplate):
     def skill_memory_plugin(self) -> SkillMemoryPlugin:
         """Return the underlying Skill Memory plugin."""
         return self.plugin
-
-    @property
-    def evaluator_model(self) -> nn.Module | None:
-        return self.ml_evaluation_plugin.model

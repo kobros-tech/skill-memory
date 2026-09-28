@@ -3,10 +3,8 @@
 
 """Direct Skill Memory evaluation: could the stored skills reproduce the accuracy?
 
-Not part of `strategy.eval()`, which always reports the independent ML
-evaluator's accuracy (see
-:mod:`skill_memory.evaluation.independent_evaluator`) -- that is the
-package's one production evaluation methodology. Everything here answers
+Not part of `strategy.eval()`. These functions are explicit diagnostics for
+inspecting stored Skill Memory states and anonymous routing. Everything here answers
 a different, diagnostic question instead, and one of the two ways to
 answer it (``routing="oracle"``) uses each sample's *true label* to pick
 a skill, which would be a real information leak if it ever reached a
@@ -18,14 +16,10 @@ was configured.
 
 from __future__ import annotations
 
-from typing import Any
-
-import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
 
-from ..evaluation.routing import score_skill_compatibility, select_skill_from_scores
 from ..utils.probing import expand_skill_logits, predict_logits
 from ._gate import require_diagnose
 from .routing import find_best_routing_skill
@@ -47,7 +41,7 @@ def evaluate_skill_memory(
     """Evaluate Skill Memory's own stored skills directly, per class.
 
     Unlike
-    :func:`~skill_memory.evaluation.independent_evaluator.evaluate_model_by_class`
+    :func:`~skill_memory.evaluation.cl_evaluator.evaluate_model_by_class`
     (which evaluates one independent evaluator model), this applies each
     *routed* skill's own frozen weights before scoring, so it measures
     whether Skill Memory's stored skills -- not an auxiliary learner --
@@ -181,93 +175,3 @@ def evaluate_class_oracle(
         device=device,
         diagnose=diagnose,
     )
-
-
-@torch.no_grad()
-def diagnose_evaluator_probe(
-    strategy,
-    test_stream,
-    *,
-    batch_size: int,
-    diagnose: bool,
-) -> dict[str, Any]:
-    r"""Diagnose the evaluator-based probe router used by ``eval_routing="probe"``.
-
-    Measures whether :func:`~skill_memory.evaluation.routing.score_skill_compatibility`
-    plus :func:`~skill_memory.evaluation.routing.select_skill_from_scores` --
-    the routing
-    :class:`~skill_memory.evaluation.independent_evaluator.MLEvaluationPlugin`
-    applies at evaluation time -- actually selects the skill that owns each
-    sample's *true* class, independently of whether the final class
-    prediction was correct. Requires `strategy.eval(...)` to have already
-    been called at least once (so `strategy.evaluator_model` exists), at
-    least one skill to be stored, and ``diagnose=True``: this reads every
-    sample's true label to judge the router, which must never happen as
-    part of a production accuracy number.
-
-    Returns ``probe_routing_accuracy`` (fraction of samples routed to their
-    true owning skill), ``probe_mean_confidence``
-    (mean :math:`\max` routing probability), ``probe_mean_margin`` (mean
-    gap between the best and second-best routing probability), and
-    ``probe_diagnostics`` (the raw per-sample records).
-    """
-    require_diagnose(diagnose, "diagnose_evaluator_probe")
-    plugin = strategy.skill_memory_plugin
-    evaluator = strategy.evaluator_model
-    if evaluator is None:
-        raise RuntimeError(
-            "No evaluator model is available; call strategy.eval() first."
-        )
-    slot_ids = sorted(plugin.memory.slots())
-    if not slot_ids:
-        raise RuntimeError("No skills have been stored yet.")
-    skill_classes = [plugin.class_map.classes_for_skill(slot) for slot in slot_ids]
-
-    evaluator.eval()
-    device = strategy.device
-    correct = 0
-    total = 0
-    confidences: list[float] = []
-    margins: list[float] = []
-    records: list[dict[str, Any]] = []
-
-    for experience in test_stream:
-        loader = DataLoader(experience.dataset, batch_size=batch_size, shuffle=False)
-        for batch in loader:
-            x = batch[0].to(device)
-            y = batch[1].to(device)
-            evaluator_logits = evaluator(x)
-            scores = score_skill_compatibility(evaluator_logits, skill_classes)
-            routing = select_skill_from_scores(scores)
-
-            for sample_index, label in enumerate(y.tolist()):
-                true_skill = plugin.class_map.find_skill_for_class_anywhere(int(label))
-                chosen_skill = slot_ids[int(routing.skill_indices[sample_index].item())]
-                is_correct = true_skill is not None and chosen_skill == true_skill
-
-                confidence = float(routing.best_probability[sample_index].item())
-                margin = float(routing.confidence_gap[sample_index].item())
-                correct += int(is_correct)
-                total += 1
-                confidences.append(confidence)
-                margins.append(margin)
-                records.append(
-                    {
-                        "true_class": int(label),
-                        "true_skill": true_skill,
-                        "chosen_skill": chosen_skill,
-                        "correct": is_correct,
-                        "confidence": confidence,
-                        "margin": margin,
-                    }
-                )
-
-    if total == 0:
-        raise RuntimeError("No evaluation samples were available to diagnose.")
-
-    return {
-        "probe_routing_accuracy": correct / total,
-        "probe_mean_confidence": float(np.mean(confidences)),
-        "probe_mean_margin": float(np.mean(margins)),
-        "probe_diagnostics": records,
-    }
