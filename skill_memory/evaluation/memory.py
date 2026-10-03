@@ -63,6 +63,11 @@ class EvaluationMemoryPlugin(SkillMemoryPlugin):
         self.eval_memory_seed = int(eval_memory_seed)
         self.eval_memory: list[EvaluationMemory] = []
 
+    @property
+    def retained_memory(self) -> list[EvaluationMemory]:
+        """Frozen examples of every class retained so far (bounded)."""
+        return self.eval_memory
+
     def after_training_exp(self, strategy, **kwargs) -> None:
         """Run Skill Memory lifecycle, then retain evaluation examples.
 

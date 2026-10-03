@@ -85,8 +85,9 @@ def timing_report(strategy) -> dict[str, dict[str, float]]:
     Requires `strategy` to have been built with
     ``SkillMemoryStrategy(..., diagnose=True)`` -- timing is never
     recorded otherwise, by design, so there is nothing to report from a
-    plain production strategy. Three buckets, each accumulated since
-    `strategy` was created (or since the last :func:`reset_timing`):
+    plain production strategy. Buckets, each accumulated since `strategy`
+    was created (or since the last :func:`reset_timing`); a bucket only
+    appears once it has been used:
 
     - ``"skill_memory_decision_probing"`` -- every call to `decide_class`
       (the REUSE-vs-SCRATCH probing loop in
@@ -94,16 +95,18 @@ def timing_report(strategy) -> dict[str, dict[str, float]]:
     - ``"skill_memory_class_training"`` -- every call to `train_on_class`
       (:mod:`skill_memory.cl.training`), timed once per class, whether it
       trained a brand-new skill from scratch or updated a reused one.
-    - ``"independent_evaluator_and_test_evaluation"`` -- every call to
-      `strategy.eval(...)`, timed once per call: training the independent
-      evaluator on retained memory (see
-      :class:`~skill_memory.evaluation.independent_evaluator.MLEvaluationPlugin`)
-      plus the real Avalanche evaluation loop over the test stream.
+    - ``"skill_memory_domain_refresh"`` -- every `train_skill_on_domain`
+      call made by ``refresh_existing_skills=True``; timed separately so the
+      cost of refreshing existing skills is never confused with the cost of
+      the replay policy itself.
+    - ``"cl_evaluation"`` -- every call to `strategy.eval(...)`, timed once
+      per call: the Avalanche evaluation loop with the stored-skill
+      :class:`~skill_memory.evaluation.cl_evaluator.CLEvaluationPlugin`
+      (calibration fitting included).
 
     Each bucket reports ``total_seconds``, ``calls``, and
-    ``mean_seconds`` -- comparing `total_seconds` across the three
-    tells you which stage of a slow run to optimize next, instead of
-    guessing from the outside.
+    ``mean_seconds`` -- comparing `total_seconds` across buckets tells you
+    which stage of a slow run to optimize next, instead of guessing.
     """
     _require_diagnosing_strategy(strategy, "timing_report")
     report = strategy.skill_memory_plugin.timing.report()

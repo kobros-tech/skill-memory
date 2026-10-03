@@ -28,6 +28,7 @@ from skill_memory import SkillMemoryStrategy
 from skill_memory.diagnostics import (
     evaluate_class_oracle,
     evaluate_skill_memory,
+    replay_provenance_report,
     timing_report,
 )
 
@@ -87,8 +88,9 @@ def parse_args() -> argparse.Namespace:
         choices=("replay", "small_replay", "new_class"),
         default="replay",
         help=(
-            "CL skill update data: full retained-history replay, bounded historical "
-            "replay for every existing skill, or newly exposed class only."
+            "Historical data used to train each class: all currently retained "
+            "examples (replay), at most K retained examples per old class "
+            "(small_replay), or none (new_class)."
         ),
     )
     parser.add_argument(
@@ -99,6 +101,22 @@ def parse_args() -> argparse.Namespace:
             "Examples per historical class during small_replay. Current "
             "classes keep --skill-train-samples-per-class."
         ),
+    )
+    parser.add_argument(
+        "--refresh-existing-skills",
+        action="store_true",
+        help=(
+            "Independently retrain every existing skill on the enlarged "
+            "domain after each experience (needs history: not with "
+            "--cl-update-mode new_class). Costs one training pass per skill "
+            "per experience."
+        ),
+    )
+    parser.add_argument(
+        "--training-seed",
+        type=int,
+        default=0,
+        help="Seed for mini-batch order / balanced re-sampling / dropout.",
     )
     parser.add_argument(
         "--skill-validation-fraction",
@@ -167,6 +185,7 @@ def main() -> None:
             else ""
         )
     )
+    print(f"Refresh existing skills: {args.refresh_existing_skills}")
     print(f"Skill class-training mode: {args.class_train_mode}")
     print("Evaluation: Skill Memory CL evaluator")
     print(f"Diagnostics: {'enabled' if args.diagnose else 'disabled'}")
@@ -224,6 +243,8 @@ def main() -> None:
         verbose=True,
         cl_update_mode=args.cl_update_mode,
         cl_replay_per_class=args.cl_replay_per_class,
+        refresh_existing_skills=args.refresh_existing_skills,
+        training_seed=args.training_seed,
     )
 
     accuracy_history: list[dict[int, float]] = []
@@ -345,13 +366,29 @@ def main() -> None:
     print("=== Summary ===")
     print("mean_forgetting=", f"{mean_forgetting:.4f}")
     print(
-        "mean_final_accuracy=",
+        "mean_final_accuracy (calibrated)=",
         f"{results['mean_final_accuracy']:.4f}",
+    )
+    print(
+        "raw_mean_final_accuracy (primary diagnostic)=",
+        f"{results['raw_mean_final_accuracy']:.4f}",
     )
     print(
         "mean_final_loss=",
         f"{results['mean_final_loss']:.4f}",
     )
+
+    if args.diagnose:
+        audit = replay_provenance_report(strategy, diagnose=True)
+        print("replay provenance:")
+        for kind in ("class_training", "refresh"):
+            row = audit[kind]
+            print(
+                f"  {kind}: calls={row['calls']} "
+                f"optimizer_steps={row['optimizer_steps']} "
+                f"historical_examples={row['historical_examples']}"
+            )
+        print(f"  violations: {audit['violations'] or 'none'}")
 
     print("final_class_accuracy:")
     for class_id, accuracy in final_accuracy.items():

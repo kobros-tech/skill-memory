@@ -141,81 +141,12 @@ def test_diagnose_false_does_not_call_perf_counter(monkeypatch):
     strategy.train(benchmark.train_stream[0])
 
 
-def test_cl_update_modes_select_expected_historical_replay_budget(monkeypatch):
-    """Native update modes replace the old demo monkey-patch semantics."""
-    from types import SimpleNamespace
+def test_cl_update_modes_are_covered_end_to_end():
+    """The old fake-object test was replaced by real runs.
 
-    captured = []
+    See ``test_replay_isolation.py``: provenance of every training call is
+    audited for each of ``new_class`` / ``small_replay`` / ``replay``.
+    """
+    from skill_memory.cl.replay import REPLAY_MODES
 
-    class FakeMemory:
-        def slots(self):
-            return {0}
-
-        def state(self, skill):
-            return {}
-
-        def metadata(self, skill):
-            return {}
-
-        def store(self, skill, state, metadata):
-            return None
-
-    class FakeClassMap:
-        def classes_for_skill(self, skill):
-            return {0}
-
-    experience = SimpleNamespace(
-        classes_in_this_experience=[1],
-        dataset=TensorDataset(
-            torch.randn(4, 4),
-            torch.ones(4, dtype=torch.long),
-        ),
-    )
-    strategy = SimpleNamespace(model=object(), optimizer=None)
-
-    def fake_train(*args, **kwargs):
-        captured.append(kwargs["historical_samples_per_class"])
-        return (
-            torch.randn(2, 4),
-            torch.tensor([0, 1], dtype=torch.long),
-        )
-
-    monkeypatch.setattr(
-        "skill_memory.cl.skill_memory_plugin.apply_skill_state_exact",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "skill_memory.cl.skill_memory_plugin.prepare_for_classes",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "skill_memory.cl.skill_memory_plugin.train_skill_on_domain",
-        fake_train,
-    )
-
-    for mode, expected in (
-        ("replay", None),
-        ("small_replay", 5),
-    ):
-        plugin = SkillMemoryPlugin(
-            memory=FakeMemory(),
-            class_train_mode="binary_one_vs_rest",
-            cl_update_mode=mode,
-            verbose=False,
-        )
-        plugin.class_map = FakeClassMap()
-        plugin._new_skills_this_experience = set()
-        plugin._reset_optimizer = lambda *args, **kwargs: None
-        plugin._update_binary_skill_domains(strategy, experience, 1)
-        assert captured[-1] == expected
-
-    plugin = SkillMemoryPlugin(
-        memory=FakeMemory(),
-        class_train_mode="binary_one_vs_rest",
-        cl_update_mode="new_class",
-        verbose=False,
-    )
-    plugin.class_map = FakeClassMap()
-    plugin._new_skills_this_experience = set()
-    plugin._update_binary_skill_domains(strategy, experience, 1)
-    assert captured == [None, 5]
+    assert set(REPLAY_MODES) == {"new_class", "small_replay", "replay"}

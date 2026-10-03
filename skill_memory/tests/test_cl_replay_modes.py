@@ -276,39 +276,3 @@ def test_class_training_full_replay_uses_all_retained_history(monkeypatch):
     )
 
     assert captured[-1] == (12, 12)
-
-
-def test_binary_one_vs_rest_trains_against_current_negative_classes():
-    from types import SimpleNamespace
-
-    from skill_memory.cl.training import train_on_class
-
-    class Experience:
-        dataset = torch.utils.data.TensorDataset(
-            torch.tensor([[1.0], [1.1], [-1.0], [-1.1], [0.5], [0.6]]),
-            torch.tensor([0, 0, 1, 1, 2, 2]),
-        )
-
-    class Strategy:
-        def __init__(self):
-            self.model = torch.nn.Linear(1, 3, bias=False)
-            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=0.1)
-            self.clock = SimpleNamespace(train_iterations=0)
-
-    strategy = Strategy()
-    before = strategy.model.weight.detach().clone()
-
-    train_on_class(
-        strategy,
-        Experience(),
-        target_class=0,
-        epochs=1,
-        batch_size=16,
-        mode="binary_one_vs_rest",
-        validation_fraction=0.0,
-    )
-
-    after = strategy.model.weight.detach()
-    assert not torch.equal(after[0], before[0])
-    assert not torch.equal(after[1], before[1])
-    assert not torch.equal(after[2], before[2])

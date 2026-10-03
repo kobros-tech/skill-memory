@@ -1,39 +1,35 @@
-name: SplitMNIST ML/CL evaluator
+name: SplitMNIST replay modes
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - "refactor/**"
-      - "fix/**"
   pull_request:
     branches:
       - main
+    paths:
+      - "skill_memory/**"
+      - ".github/workflows/demo-splitmnist.yml"
 
 jobs:
-  run-ml-evaluator:
+  splitmnist:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - eval_epochs: 1
-            eval_routing: none
-          - eval_epochs: 10
-            eval_routing: none
-          - eval_epochs: 100
-            eval_routing: none
-          - eval_epochs: 10
-            eval_routing: probe
+          - mode: new_class
+            refresh: ""
+          - mode: small_replay
+            refresh: ""
+          - mode: replay
+            refresh: ""
+          - mode: small_replay
+            refresh: "--refresh-existing-skills"
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -47,20 +43,23 @@ jobs:
           path: data
           key: splitmnist-dataset-v1-${{ runner.os }}
 
-      - name: Run 5 experiences, ${{ matrix.eval_routing }} evaluation, ${{ matrix.eval_epochs }} eval epoch(s)
+      - name: Run 5 experiences (${{ matrix.mode }} ${{ matrix.refresh }})
         run: |
-          python skill_memory/demos/demo_splitmnist.py \
+          python -m skill_memory.demos.demo_splitmnist \
             --dataset-root data \
             --n-experiences 5 \
-            --eval-epochs ${{ matrix.eval_epochs }} \
-            --eval-routing ${{ matrix.eval_routing }} \
-            | tee ml_${{ matrix.eval_routing }}_${{ matrix.eval_epochs }}ep_${{ github.run_id }}.txt
+            --cl-update-mode ${{ matrix.mode }} \
+            ${{ matrix.refresh }} \
+            --diagnose \
+            | tee splitmnist_${{ matrix.mode }}${{ matrix.refresh && '_refresh' || '' }}.txt
+          # The replay audit must report no violations.
+          grep -q "violations: none" splitmnist_*.txt
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ml-${{ matrix.eval_routing }}-${{ matrix.eval_epochs }}ep-${{ github.run_id }}
-          path: ml_${{ matrix.eval_routing }}_${{ matrix.eval_epochs }}ep_*.txt
+          name: splitmnist-${{ matrix.mode }}${{ matrix.refresh && '-refresh' || '' }}-${{ github.run_id }}
+          path: splitmnist_*.txt
           if-no-files-found: warn
           retention-days: 14

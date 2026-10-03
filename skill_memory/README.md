@@ -17,7 +17,7 @@ utils/probing.py            (no dependency on cl/ or evaluation/)
 cl/skill_registry.py  -->  cl/decision.py  -->  cl/skill_memory_plugin.py
         |                                              |
         v                                              v
-cl/training.py                          cl/persistent_skill_memory_plugin.py
+cl/replay.py --> cl/training.py          cl/persistent_skill_memory_plugin.py
         |
         v
 evaluation/routing.py
@@ -29,7 +29,8 @@ evaluation/behavior.py --> evaluation/reverse_engineering.py
 evaluation/fingerprint_routing.py, evaluation/global_fingerprint_refresh.py
         |
         v
-evaluation/independent_evaluator.py   (subclasses cl.skill_memory_plugin.SkillMemoryPlugin)
+evaluation/memory.py, evaluation/cl_evaluator.py
+                                      (memory.py subclasses cl.skill_memory_plugin.SkillMemoryPlugin)
         |
         v
 strategy.py                             (top-level; imports everything above)
@@ -38,10 +39,31 @@ diagnostics/   (depends only on utils/ and evaluation/routing.py; imported by
                 production code in exactly three places -- see below)
 ```
 
-`evaluation/independent_evaluator.py` is deliberately **not** re-exported
-from `evaluation/__init__.py` — only from the top-level `skill_memory`
+`evaluation/memory.py` and `evaluation/cl_evaluator.py` are deliberately
+**not** re-exported from `evaluation/__init__.py` — only from the top-level `skill_memory`
 package — for exactly this reason (see the comment at the top of
 `evaluation/__init__.py`).
+
+## Replay / refresh contracts (`cl/replay.py`, `cl/training.py`)
+
+- `cl/replay.py` is the **only** place that decides what "historical data"
+  means. `ReplayPolicy.retained_for_training(...)` returns `None` for
+  `new_class`, so the retained memory is not even passed down; do not add a
+  second path that reads `eval_memory` directly.
+- `SkillMemoryPlugin.retained_memory` is a property (empty in the base
+  plugin, the bounded frozen memory in `EvaluationMemoryPlugin`).
+- Every `train_on_class` / `train_skill_on_domain` call returns a
+  `TrainingResult` whose `provenance` is appended to `plugin.training_log`.
+  New data sources must be added to `TrainingProvenance` *and* to
+  `diagnostics/replay.py`'s invariant checks, or the audit goes blind.
+- All randomness in training flows from explicit seeds
+  (`training_seed` -> `derive_seed` -> `_seeded_loader` + `_isolated_rng`).
+  Never call `torch.manual_seed` or sample from the global RNG inside the
+  training path; `tests/test_reproducibility.py` will fail.
+- The `validation_fraction` hold-out is stored under
+  `CALIBRATION_EXAMPLES_KEY` and is **calibration data only**.
+- `refresh_existing_skills` is orthogonal to `cl_update_mode`; keep their
+  timing buckets and provenance kinds (`"class"` vs `"refresh"`) separate.
 
 ## Bookkeeping invariants (`cl/skill_registry.py`)
 
@@ -80,8 +102,7 @@ training paths, and its before/after-eval snapshot restore.
 *never mutated* — no resize, no restore, and (critically) no per-skill
 `load_state_dict` copy of every parameter tensor. This is what makes
 `score_class_against_skills`' "for every stored skill, forward a probe
-batch" loop, and `MLEvaluationPlugin.after_eval_forward`'s per-batch
-routing, cheap: trying skill `k+1` costs one more forward pass, not one
+batch" loop, and `CLEvaluationPlugin`'s per-batch skill scoring, cheap: trying skill `k+1` costs one more forward pass, not one
 more full parameter copy. `evaluate_state`'s classifier-growth rule for a
 genuinely new class (`_functional_growth_for_experience`) deliberately
 duplicates `IncrementalClassifier.adaptation`'s math rather than calling
@@ -151,8 +172,8 @@ stays comparable across runs.
 
 `evaluation/routing.py` holds the shared primitives
 (`score_skill_compatibility`, `select_skill_from_scores`,
-`_normalize_routing_scores`) used by both the evaluator-based probe router
-(`evaluation/independent_evaluator.py`) and the evaluator-free anonymous
+`_normalize_routing_scores`) used by the persistent fingerprint plugin
+(`evaluation/fingerprint_routing.py`) and the evaluator-free anonymous
 router (`find_best_routing_skill` in `diagnostics/routing.py`). If
 you change the temperature/normalization rule in one, check whether the
 other's tests

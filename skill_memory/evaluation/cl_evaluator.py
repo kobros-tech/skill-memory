@@ -1,16 +1,28 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
 
-"""Standalone Skill Memory evaluator.
+r"""Skill Memory CL evaluator (the evaluator used by ``strategy.eval()``).
 
-This evaluator uses only the stored Skill Memory snapshots at prediction time.
-Each canonical class is scored by its own YES/NO verifier. Held-out training
-examples stored with the skill are used only to calibrate that verifier's raw
-logit into a comparable one-vs-rest score. Test labels never participate in
-routing or prediction.
+At prediction time only the stored Skill Memory snapshots are used; no
+evaluator model is trained.  Each canonical class :math:`c` is scored by the
+YES/NO verifier of the skill :math:`s(c)` that owns it:
 
-The evaluator is intentionally separate from the independent ML evaluator:
-the two can be selected independently by the experiment configuration.
+.. math::
+
+    r_c(x) = z^{(s(c))}_c(x), \qquad
+    \tilde r_c(x) = a_c\, r_c(x) + b_c, \qquad
+    \hat y(x) = \arg\max_c \tilde r_c(x),
+
+where :math:`(a_c, b_c)` is a monotone Platt calibration (see
+:func:`_fit_platt_calibrator`) fitted on the skill's **calibration hold-out**
+(``CALIBRATION_EXAMPLES_KEY``) -- examples excluded from training.  Classes
+that have not been trained yet receive the constant ``unseen_logit``.  Test
+labels never participate in routing or prediction; they are used only *after*
+prediction to count correct answers.
+
+Two accuracies are reported: ``raw`` (argmax of :math:`r_c`) and
+``calibrated`` (argmax of :math:`\tilde r_c`).  Treat raw as the primary
+diagnostic until calibration is shown to help consistently.
 """
 
 from __future__ import annotations
@@ -23,76 +35,55 @@ import torch
 from avalanche.training.plugins import SupervisedPlugin
 from torch import nn
 
-from ..utils.probing import incremental_active_units, predict_logits
+from ..cl.skill_registry import CALIBRATION_EXAMPLES_KEY
+from ..utils.probing import predict_logits
 from ..utils.protocol_guard import assert_evaluation_experiences
 from .memory import EvaluationMemoryPlugin
+
+#: Number of skills evaluated together through one ``torch.vmap`` call.
+#: Larger chunks use more memory (one stacked parameter copy per skill in the
+#: chunk); the value changes speed only, never predictions.
+DEFAULT_EVAL_CHUNK_SIZE = 8
 
 
 def _class_logit(
     logits: torch.Tensor,
     class_id: int,
     owned_classes: Sequence[int],
-    negative_classes: Sequence[int] | None = None,
 ) -> torch.Tensor:
-    """Extract the verifier logit for one owned class."""
+    """Extract the verifier logit of ``class_id`` (column ``class_id``).
+
+    Skills are trained with the *global* class index as the output column
+    (see :func:`skill_memory.cl.training.train_on_class`), so the column is
+    the class id itself.  ``owned_classes`` is only used for validation.
+    """
     if logits.ndim != 2:
         raise RuntimeError("Skill logits must have shape [batch, classes].")
-    if logits.shape[1] > len(owned_classes):
-        if class_id >= logits.shape[1]:
-            raise RuntimeError(
-                f"class {class_id} is outside skill classifier width {logits.shape[1]}"
-            )
-        target_logit = logits[:, class_id]
-    else:
-        try:
-            position = list(owned_classes).index(class_id)
-        except ValueError as exc:
-            raise RuntimeError(
-                f"class {class_id} is not owned by the selected skill"
-            ) from exc
-        target_logit = logits[:, position]
-    negatives = (
-        sorted(int(value) for value in negative_classes)
-        if negative_classes is not None
-        else []
-    )
-    negatives = [value for value in negatives if value != class_id]
-    if not negatives:
-        return target_logit
-    if max(negatives) >= logits.shape[1]:
+    if class_id not in owned_classes:
+        raise RuntimeError(f"class {class_id} is not owned by the selected skill")
+    if class_id >= logits.shape[1]:
         raise RuntimeError(
-            f"negative class {max(negatives)} is outside skill classifier "
-            f"width {logits.shape[1]}"
+            f"class {class_id} is outside skill classifier width {logits.shape[1]}"
         )
-    return target_logit - torch.logsumexp(logits[:, negatives], dim=1)
-
-
-def _active_classes(
-    model: nn.Module,
-    state: dict[str, torch.Tensor],
-    owned_classes: Sequence[int],
-) -> list[int]:
-    active_units = incremental_active_units(model, state)
-    if active_units is None:
-        return sorted({int(class_id) for class_id in owned_classes})
-    return [
-        class_id
-        for class_id, active in enumerate(active_units.tolist())
-        if int(active) != 0
-    ]
+    return logits[:, class_id]
 
 
 def _fit_platt_calibrator(
     scores: torch.Tensor,
     targets: torch.Tensor,
 ) -> tuple[float, float]:
-    """Fit monotonic sigmoid calibration on held-out training data.
+    r"""Fit monotonic sigmoid (Platt) calibration on held-out data.
 
-    The returned values satisfy:
+    Minimises, over :math:`(a, b)`,
 
-        calibrated_logit = scale * raw_logit + bias
+    .. math::
 
-    Only the held-out validation examples stored by Skill Memory are used.
+        \frac1n\sum_i \operatorname{BCE}\bigl(a\,r_i + b,\ t_i\bigr)
+        + 10^{-4}(a^2 + b^2),
+
+    and returns :math:`(a, b)` with :math:`a \ge 10^{-3}` so the calibrated
+    score stays monotone in the raw verifier logit.  Falls back to the
+    identity :math:`(1, 0)` when the hold-out lacks positives or negatives.
     """
     scores = scores.detach().float().flatten()
     targets = targets.detach().float().flatten()
@@ -132,11 +123,18 @@ def _fit_platt_calibrator(
 class CLEvaluationPlugin(SupervisedPlugin):
     """Anonymous evaluator driven entirely by stored Skill Memory skills.
 
-    Prediction is:
+    Prediction is ``x -> canonical Skill Memory verifiers -> calibrated class
+    scores -> y``.  No evaluator model is trained.
 
-        x -> canonical Skill Memory verifiers -> calibrated class scores -> y
-
-    No evaluator model is trained and no ML evaluator output is consulted.
+    Parameters
+    ----------
+    eval_chunk_size:
+        How many skills share one ``torch.vmap`` evaluation (speed/memory
+        trade-off only; default :data:`DEFAULT_EVAL_CHUNK_SIZE`).
+    debug_scores:
+        Print per-sample raw/calibrated scores for the first evaluation
+        batch.  Off by default; the printout shows true labels, so it is a
+        human diagnostic that never influences predictions.
     """
 
     def __init__(
@@ -146,8 +144,14 @@ class CLEvaluationPlugin(SupervisedPlugin):
         verbose: bool = True,
         strict_protocol: bool = True,
         unseen_logit: float = -20.0,
+        eval_chunk_size: int = DEFAULT_EVAL_CHUNK_SIZE,
+        debug_scores: bool = False,
     ) -> None:
         super().__init__()
+        if eval_chunk_size < 1:
+            raise ValueError("eval_chunk_size must be positive")
+        self.eval_chunk_size = int(eval_chunk_size)
+        self.debug_scores = bool(debug_scores)
         self.memory_plugin = memory_plugin
         self.verbose = bool(verbose)
         self.strict_protocol = bool(strict_protocol)
@@ -167,6 +171,8 @@ class CLEvaluationPlugin(SupervisedPlugin):
         self._num_classes = 0
         self._eval_skill_groups: list[list[tuple[int, dict[str, torch.Tensor]]]] = []
         self._score_debug_printed = False
+        self._raw_mb_output: torch.Tensor | None = None
+        self._eval_width = 0
 
     def after_training_exp(self, strategy, **kwargs) -> None:
         """Record class introduction for forgetting bookkeeping."""
@@ -194,7 +200,7 @@ class CLEvaluationPlugin(SupervisedPlugin):
                 continue
 
             metadata = memory.metadata(skill)
-            examples_by_class = metadata.get("verification_examples_by_class", {})
+            examples_by_class = metadata.get(CALIBRATION_EXAMPLES_KEY, {})
             state = memory.state(skill)
 
             validation_inputs = []
@@ -220,17 +226,11 @@ class CLEvaluationPlugin(SupervisedPlugin):
                 logits = predict_logits(strategy.model, state, inputs)
 
             for class_id in owned_classes:
-                domain_classes = _active_classes(strategy.model, state, owned_classes)
-                raw_score = _class_logit(
-                    logits,
-                    class_id,
-                    owned_classes,
-                    [value for value in domain_classes if value != class_id],
-                )
+                raw_score = _class_logit(logits, class_id, owned_classes)
                 binary_target = targets.eq(class_id).to(dtype=torch.float32)
                 scale, bias = _fit_platt_calibrator(raw_score, binary_target)
 
-                if self.verbose:
+                if self.debug_scores:
                     positive = binary_target > 0.5
                     negative = ~positive
                     positive_scores = raw_score[positive]
@@ -287,6 +287,23 @@ class CLEvaluationPlugin(SupervisedPlugin):
 
         self._num_classes = max(self._calibrators) + 1
 
+    def _score_width(self, strategy) -> int:
+        """Width of the score matrix handed back to Avalanche.
+
+        It must cover every class that can appear as a *target* (otherwise
+        Avalanche's loss metric indexes out of bounds for classes that have
+        not been trained yet), so it is the larger of the trained width and
+        the class-id range declared by the evaluation stream's metadata.
+        Only metadata is read -- never samples or labels -- and the extra
+        columns hold the constant ``unseen_logit``.
+        """
+        width = self._num_classes
+        for experience in getattr(strategy, "current_eval_stream", None) or ():
+            declared = getattr(experience, "classes_in_this_experience", None) or ()
+            if len(declared):
+                width = max(width, max(int(c) for c in declared) + 1)
+        return width
+
     def _prepare_eval_skill_batches(self, strategy) -> None:
         """Cache device-resident skill states and batch compatible states."""
         memory = self.memory_plugin.memory
@@ -320,6 +337,7 @@ class CLEvaluationPlugin(SupervisedPlugin):
             return
 
         self._build_calibrators(strategy)
+        self._eval_width = self._score_width(strategy)
         self._prepare_eval_skill_batches(strategy)
         self._current_class_loss = {}
         self._current_class_correct = {}
@@ -345,7 +363,7 @@ class CLEvaluationPlugin(SupervisedPlugin):
 
         inputs = strategy.mbatch[0]
         raw_scores = torch.full(
-            (inputs.shape[0], self._num_classes),
+            (inputs.shape[0], self._eval_width),
             self.unseen_logit,
             device=inputs.device,
             dtype=torch.float32,
@@ -355,8 +373,8 @@ class CLEvaluationPlugin(SupervisedPlugin):
         class_map = self.memory_plugin.class_map
 
         for members in self._eval_skill_groups:
-            for start in range(0, len(members), 8):
-                chunk = members[start : start + 8]
+            for start in range(0, len(members), self.eval_chunk_size):
+                chunk = members[start : start + self.eval_chunk_size]
                 skills = [skill for skill, _ in chunk]
                 names = chunk[0][1].keys()
                 stacked_params = {
@@ -373,7 +391,6 @@ class CLEvaluationPlugin(SupervisedPlugin):
 
                 batched_logits = torch.vmap(call)(stacked_params)
                 for index, skill in enumerate(skills):
-                    _, one_skill_params = chunk[index]
                     owned_classes = sorted(class_map.classes_for_skill(skill))
                     logits = batched_logits[index]
                     for class_id, (
@@ -383,23 +400,13 @@ class CLEvaluationPlugin(SupervisedPlugin):
                     ) in self._calibrators.items():
                         if calibrated_skill != skill:
                             continue
-                        domain_classes = _active_classes(
-                            strategy.model,
-                            one_skill_params,
-                            owned_classes,
-                        )
-                        raw_score = _class_logit(
-                            logits,
-                            class_id,
-                            owned_classes,
-                            [value for value in domain_classes if value != class_id],
-                        )
+                        raw_score = _class_logit(logits, class_id, owned_classes)
                         raw_scores[:, class_id] = raw_score
                         calibrated_scores[:, class_id] = scale * raw_score + bias
 
         self._raw_mb_output = raw_scores
 
-        if self.verbose and not self._score_debug_printed:
+        if self.debug_scores and not self._score_debug_printed:
             targets = strategy.mbatch[1]
             print("CL score election debug:")
             for sample_index in range(min(10, inputs.shape[0])):

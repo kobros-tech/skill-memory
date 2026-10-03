@@ -19,11 +19,7 @@ from ..evaluation.routing import RoutingResult, _normalize_routing_scores
 from ._gate import require_diagnose
 
 
-def _skill_own_score(
-    logits: torch.Tensor,
-    owned_classes,
-    state,
-) -> torch.Tensor:
+def _skill_own_score(logits: torch.Tensor, owned_classes) -> torch.Tensor:
     r"""Score one skill's own raw logits at its own owned class columns.
 
     Owning zero classes scores as all-zero (handled by
@@ -58,41 +54,9 @@ def _skill_own_score(
             "drifted apart"
         )
 
-    active_classes = []
-    for key, value in state.items():
-        if key.endswith("active_units"):
-            active_classes = [
-                index for index, active in enumerate(value.tolist()) if int(active) != 0
-            ]
-            break
-    if not active_classes:
-        active_classes = owned
-
-    if max(active_classes) >= width:
-        raise RuntimeError(
-            f"skill active class {max(active_classes)} exceeds raw output width {width}"
-        )
-
-    owned_positions = [
-        active_classes.index(class_id)
-        for class_id in owned
-        if class_id in active_classes
-    ]
-    if not owned_positions:
-        return torch.zeros(logits.shape[0])
-
-    negative = [class_id for class_id in active_classes if class_id not in owned]
-    if not negative:
-        return torch.ones(logits.shape[0], device=logits.device)
-
-    owned_score = torch.logsumexp(logits[:, [owned_positions[0]]], dim=1)
-    if len(owned_positions) > 1:
-        owned_score = torch.logsumexp(logits[:, owned_positions], dim=1)
-    negative_score = torch.logsumexp(
-        logits[:, negative],
-        dim=1,
-    )
-    return torch.sigmoid(owned_score - negative_score)
+    if width == 1:
+        return torch.sigmoid(logits[:, 0])
+    return torch.softmax(logits, dim=1)[:, owned].sum(dim=1)
 
 
 def find_best_routing_skill(
@@ -125,10 +89,8 @@ def find_best_routing_skill(
     del states
     scores = torch.stack(
         [
-            _skill_own_score(logits, owned, state)
-            for logits, owned, state in zip(
-                logits_by_skill, classes_by_skill, states, strict=True
-            )
+            _skill_own_score(logits, owned)
+            for logits, owned in zip(logits_by_skill, classes_by_skill, strict=True)
         ],
         dim=0,
     )

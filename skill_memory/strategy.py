@@ -1,26 +1,28 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
 
-"""High-level Avalanche strategy with Skill Memory and ML evaluation.
+"""High-level Avalanche strategy: Skill Memory training + CL evaluation.
 
-The strategy integrates two distinct learning/evaluation processes:
+Two cooperating components, both owned by :class:`SkillMemoryStrategy`:
 
-1. Skill Memory
-   - class-level REUSE/SCRATCH decisions
-   - skill allocation and storage
-   - class-to-skill bookkeeping
+1. **Skill Memory training** (``EvaluationMemoryPlugin``, a
+   ``SkillMemoryPlugin`` subclass)
+   - class-level REUSE/SCRATCH decisions by functional probing,
+   - skill allocation, storage and class->skill bookkeeping,
+   - a bounded per-class *retained memory* of frozen examples,
+   - class training under an explicit replay policy.
 
-2. Anonymous ML evaluator
-   - receives only x at prediction time
-   - learns x -> y from frozen examples retained by Skill Memory
-   - is trained on all accumulated evaluation memory
-   - evaluates all classes seen so far
-   - provides the methodology used to measure non-forgetting
+2. **CL evaluation** (``CLEvaluationPlugin``)
+   - receives only ``x`` at prediction time,
+   - scores every canonical class with the stored skill that owns it,
+   - applies a Platt calibration fitted on each skill's calibration hold-out,
+   - **trains no evaluator model** and consults no external classifier.
 
-The ML evaluator is intentionally independent from the Skill Memory model.
-Its purpose is to measure whether an independently trained classifier can
-recover the class identity of anonymous samples from the accumulated
-retained data after continual training.
+Historical-data semantics are defined once, in :mod:`skill_memory.cl.replay`:
+``cl_update_mode`` (``new_class`` | ``small_replay`` | ``replay``) controls how
+much *retained* history enters class training, and the separate
+``refresh_existing_skills`` switch controls whether existing skills are
+retrained on the enlarged domain.  ``docs/MATHEMATICS.md`` gives the formulas.
 """
 
 from __future__ import annotations
@@ -39,12 +41,12 @@ from .cl.skill_memory_plugin import SkillMemoryPlugin
 from .cl.skill_registry import SkillMemory
 from .cl.training import VALID_CLASS_TRAIN_MODES
 from .diagnostics.timing import TimingAccumulator
-from .evaluation.cl_evaluator import CLEvaluationPlugin
+from .evaluation.cl_evaluator import DEFAULT_EVAL_CHUNK_SIZE, CLEvaluationPlugin
 from .evaluation.memory import EvaluationMemoryPlugin
 
 
 class SkillMemoryStrategy(SupervisedTemplate):
-    """Avalanche strategy integrating Skill Memory and anonymous ML evaluation.
+    """Avalanche strategy integrating Skill Memory training and CL evaluation.
 
     The Avalanche strategy is responsible for lifecycle integration and for
     exposing the complete experiment through one public object.
@@ -54,11 +56,33 @@ class SkillMemoryStrategy(SupervisedTemplate):
     by SkillMemoryPlugin after that custom training has been scheduled.
 
     Skill Memory training and evaluation-memory retention remain owned by
-    ``EvaluationMemoryPlugin``, which extends ``SkillMemoryPlugin``. The
-    independent ML evaluator is the sole evaluation methodology used by the
+    ``EvaluationMemoryPlugin``, which extends ``SkillMemoryPlugin``.
+    ``CLEvaluationPlugin`` is the sole evaluation methodology used by the
     normal ``strategy.eval()`` lifecycle. Direct Skill Memory diagnostics
     (``skill_memory.diagnostics``) are intentionally separate from this
     strategy and never run as part of it.
+
+    Replay / refresh parameters
+    ---------------------------
+    ``cl_update_mode``
+        ``"new_class"``: current-class data only (historical replay = 0);
+        ``"small_replay"``: current class + at most ``cl_replay_per_class``
+        retained examples per old class; ``"replay"``: current class + *all
+        currently retained* examples per old class.  The retained memory is
+        bounded by ``eval_memory_per_class``, so ``replay`` is not "all
+        historical training data".
+    ``refresh_existing_skills``
+        Independently retrain every pre-existing skill on the enlarged domain
+        after each experience (binary mode; incompatible with ``new_class``).
+        Costs one training pass per skill per experience.
+    ``binary_negative_pool`` / ``allow_offline_negative_pool``
+        Offline oracle negatives for ablations; rejected unless explicitly
+        allowed, and never combined with ``new_class``.
+    ``training_seed``
+        Seeds mini-batch order and balanced re-sampling for reproducibility.
+    ``eval_chunk_size``, ``debug_scores``
+        Evaluator speed knob and verbose score printout (see
+        :class:`~skill_memory.evaluation.cl_evaluator.CLEvaluationPlugin`).
 
     ``diagnose=False`` (the default) means `self.timing` and the skill
     memory plugin's own `self.timing` never record anything -- every
@@ -111,8 +135,13 @@ class SkillMemoryStrategy(SupervisedTemplate):
         diagnose: bool = False,
         strict_protocol: bool = True,
         binary_negative_pool=None,
+        allow_offline_negative_pool: bool = False,
+        refresh_existing_skills: bool = False,
+        training_seed: int = 0,
         batch_stage1: bool = False,
         stage1_chunk_size: int | None = None,
+        eval_chunk_size: int = DEFAULT_EVAL_CHUNK_SIZE,
+        debug_scores: bool = False,
     ) -> None:
         if eval_memory_per_class <= 0:
             raise ValueError("eval_memory_per_class must be positive")
@@ -136,8 +165,6 @@ class SkillMemoryStrategy(SupervisedTemplate):
             device = torch.device(device)
 
         self.verbose = verbose
-        self.cl_update_mode = cl_update_mode
-        self.cl_replay_per_class = int(cl_replay_per_class)
         self.train_epochs = train_epochs
         self.diagnose = bool(diagnose)
         self.timing = TimingAccumulator(enabled=self.diagnose)
@@ -173,8 +200,11 @@ class SkillMemoryStrategy(SupervisedTemplate):
             diagnose=self.diagnose,
             strict_protocol=strict_protocol,
             binary_negative_pool=binary_negative_pool,
+            allow_offline_negative_pool=allow_offline_negative_pool,
             cl_update_mode=cl_update_mode,
             cl_replay_per_class=cl_replay_per_class,
+            refresh_existing_skills=refresh_existing_skills,
+            training_seed=training_seed,
             batch_stage1=batch_stage1,
             stage1_chunk_size=stage1_chunk_size,
         )
@@ -183,6 +213,8 @@ class SkillMemoryStrategy(SupervisedTemplate):
             memory_plugin=self.plugin,
             verbose=verbose,
             strict_protocol=strict_protocol,
+            eval_chunk_size=eval_chunk_size,
+            debug_scores=debug_scores,
         )
         self.evaluation_plugin = self.cl_evaluation_plugin
 
@@ -236,6 +268,16 @@ class SkillMemoryStrategy(SupervisedTemplate):
     # ------------------------------------------------------------------
     # Public accessors
     # ------------------------------------------------------------------
+
+    @property
+    def cl_update_mode(self) -> str:
+        """Replay mode in force (``new_class`` | ``small_replay`` | ``replay``)."""
+        return self.plugin.cl_update_mode
+
+    @property
+    def cl_replay_per_class(self) -> int:
+        """``K``: the ``small_replay`` per-class cap."""
+        return self.plugin.cl_replay_per_class
 
     @property
     def skill_memory(self) -> SkillMemory:

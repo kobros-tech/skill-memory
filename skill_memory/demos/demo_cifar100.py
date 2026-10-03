@@ -111,6 +111,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--refresh-existing-skills",
+        action="store_true",
+        help="Retrain every existing skill on the enlarged domain each experience.",
+    )
+    parser.add_argument("--training-seed", type=int, default=0)
+    parser.add_argument(
         "--skill-validation-fraction",
         type=float,
         default=0.2,
@@ -246,6 +252,8 @@ def main() -> None:
         diagnose=args.diagnose,
         verbose=True,
         cl_update_mode=args.cl_update_mode,
+        refresh_existing_skills=args.refresh_existing_skills,
+        training_seed=args.training_seed,
         cl_replay_per_class=args.cl_replay_per_class,
     )
 

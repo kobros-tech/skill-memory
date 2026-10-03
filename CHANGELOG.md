@@ -3,6 +3,84 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [3.0.0] - 2026
+
+Makes the replay experiment a clean, attributable comparison and brings the
+package's tests, diagnostics, demos and documentation in line with the
+CL-evaluator architecture. **Breaking changes are marked.**
+
+### Added
+
+- `docs/MATHEMATICS.md`: the full mathematical specification (decision rule,
+  objectives, balanced sampling, hold-out, replay policy, refresh, cost model,
+  calibration, reproducibility), with tests that pin the formulas
+  (`test_training_math.py`).
+- `skill_memory.cl.replay` (`ReplayPolicy`, `RefreshPolicy`,
+  `validate_policies`, `select_historical_samples`): the single definition of
+  what "historical data" means. `new_class` => 0 historical examples,
+  `small_replay` => at most `cl_replay_per_class` retained examples per old
+  class, `replay` => all *currently retained* examples (bounded by
+  `eval_memory_per_class`, i.e. not "all historical training data").
+- `refresh_existing_skills` (default `False`): retraining of existing skills on
+  the enlarged domain is now an independent switch, with its own timing bucket
+  `skill_memory_domain_refresh`.
+- `training_seed`: seeds mini-batch order, balanced re-sampling and dropout.
+  Training runs in a forked, seeded RNG scope, so stored skills are
+  bit-identical across runs regardless of the global RNG state.
+- Provenance: `TrainingProvenance` / `TrainingResult` returned by
+  `train_on_class` and `train_skill_on_domain`, collected in
+  `plugin.training_log`, and checked by the new
+  `skill_memory.diagnostics.replay_provenance_report(..., diagnose=True)`.
+- `balanced_weights` and `split_holdout` helpers (shared by both training
+  paths, individually tested).
+- `CLEvaluationPlugin(eval_chunk_size=..., debug_scores=...)`;
+  `DEFAULT_EVAL_CHUNK_SIZE = 8` replaces a hard-coded constant.
+- `skill_memory.demos.demo_replay_ablation`: offline, one-factor-at-a-time
+  comparison of the replay modes and the refresh switch.
+- Tests: replay policy, replay isolation, reproducibility, CL evaluator,
+  training maths, demos.
+
+### Changed (breaking)
+
+- `binary_negative_pool` is an offline *oracle* source: it now requires
+  `allow_offline_negative_pool=True`, obeys the replay cap, and is rejected
+  together with `cl_update_mode="new_class"`.
+- Refreshing existing skills no longer happens implicitly in binary mode; set
+  `refresh_existing_skills=True`. It is rejected with `new_class` and with
+  `class_train_mode="multiclass"`.
+- `train_on_class` / `train_skill_on_domain` return a `TrainingResult`
+  (`validation_inputs`, `validation_targets`, `provenance`) instead of a plain
+  tuple, and accept `sampler_seed`.
+- Skill metadata key `verification_examples_by_class` is renamed
+  `calibration_examples_by_class` (`CALIBRATION_EXAMPLES_KEY`): it is
+  calibration hold-out data, never replay data.
+- The timing bucket `independent_evaluator_and_test_evaluation` is now
+  `cl_evaluation`.
+- `diagnose_evaluator_probe` and the independent ML evaluator no longer exist;
+  the corresponding tests were removed.
+
+### Fixed
+
+- Evaluating a test stream containing classes that have no skill yet raised
+  `IndexError` in Avalanche's loss metric; the score matrix now covers every
+  declared class id (metadata only) and such classes score 0 accuracy.
+- Mini-batch sampling and dropout previously consumed the global RNG, so equal
+  seeds could give different runs.
+* CI: the older-torch job pinned `torch` without a matching `torchvision`
+  (causing an import failure around `torch.library.register_fake`), and its
+  pins were then passed unquoted so the shell interpreted `numpy<2` as a
+  redirect. Installing `numpy<2` in a *second* step could also leave a JAX
+  installation selected for NumPy 2 in place
+  (`avalanche -> qpsolvers -> jaxopt/qpax -> jax`), which crashed
+  `import avalanche` on `np.dtypes.StringDType`. The compatibility stack
+  (`torch 2.3`, `torchvision 0.18`, `numpy<2`, `jax==0.4.34`,
+  `jaxlib==0.4.34`) is now installed in the **same pip call as the package**,
+  with every requirement quoted and JAX/JAXLIB explicitly pinned for the
+  NumPy-1.x compatibility job. `test_ci_workflows.py` renders every workflow
+  `run:` script per matrix entry and asserts the single-call, quoted install.
+- Platt-calibration, strategy, plugin, timing and diagnostics docstrings, the
+  READMEs and the CI workflows no longer describe the removed ML evaluator.
+
 ## [2.3.0] - 2026
 
 ### Added

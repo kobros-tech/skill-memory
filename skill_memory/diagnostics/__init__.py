@@ -22,8 +22,9 @@ function actually risks:
   forward-pass time regardless of how anything was configured
   (:func:`find_best_routing_skill`, :func:`route_probe_logits`,
   :func:`evaluate_skill_memory`, :func:`evaluate_class_oracle`,
-  :func:`diagnose_evaluator_probe`, :func:`routing_rank_diagnostics`,
-  :func:`class_index_alignment_report`) require the caller to pass
+  :func:`routing_rank_diagnostics`,
+  :func:`class_index_alignment_report`, :func:`replay_provenance_report`)
+  require the caller to pass
   ``diagnose=True`` at that exact call site, regardless of how the
   strategy involved was built. A leak here can never be explained away
   as "the strategy happened to be built the wrong way" -- the call
@@ -54,6 +55,7 @@ from .leakage import (
     audit_strategy_leakage,
 )
 from .old_scores import measure_old_class_scores
+from .replay import replay_provenance_report
 from .routing import find_best_routing_skill, route_probe_logits
 from .timing import TimingAccumulator, reset_timing, timing_report
 
@@ -64,10 +66,10 @@ __all__ = [
     "audit_strategy_leakage",
     "measure_old_class_scores",
     "class_index_alignment_report",
-    "diagnose_evaluator_probe",
     "evaluate_class_oracle",
     "evaluate_skill_memory",
     "find_best_routing_skill",
+    "replay_provenance_report",
     "reset_timing",
     "route_probe_logits",
     "routing_rank_diagnostics",
