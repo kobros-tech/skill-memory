@@ -30,7 +30,7 @@ GATED_FUNCTIONS = [
     diag.route_probe_logits,
     diag.evaluate_skill_memory,
     diag.evaluate_class_oracle,
-    diag.diagnose_evaluator_probe,
+    diag.replay_provenance_report,
     diag.routing_rank_diagnostics,
     diag.class_index_alignment_report,
 ]
@@ -53,11 +53,7 @@ def _strategy(**kwargs):
         model=model,
         optimizer=torch.optim.SGD(model.parameters(), lr=0.05),
         criterion=torch.nn.CrossEntropyLoss(),
-        evaluator_model_factory=lambda: SimpleMLP(
-            input_size=6, hidden_size=8, num_classes=2
-        ),
         eval_memory_per_class=5,
-        eval_epochs=1,
         train_mb_size=16,
         train_epochs=1,
         eval_mb_size=16,

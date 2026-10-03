@@ -1,10 +1,12 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
 
-"""Sequential SplitMNIST Skill Memory experiment.
+"""Sequential CIFAR-100 Skill Memory experiment.
 
-The demo uses the same public update-policy API as CIFAR-100. A run always
-starts at experience 0 so replay and forgetting have a valid history.
+The demo deliberately exposes only experiment choices that have a clear
+continual-learning meaning. Every run starts at experience 0, and update_mode
+selects one complete training policy rather than combining independent
+switches that change both the algorithm and its compute budget.
 """
 
 from __future__ import annotations
@@ -13,8 +15,8 @@ import argparse
 
 import numpy as np
 import torch
-from avalanche.benchmarks.classic import SplitMNIST
-from avalanche.models import SimpleMLP
+from avalanche.benchmarks.classic import SplitCIFAR100
+from avalanche.models import SlimResNet18
 from torch import nn
 
 from skill_memory import SkillMemoryStrategy
@@ -28,11 +30,11 @@ from skill_memory.diagnostics import (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a sequential Skill Memory experiment on SplitMNIST."
+        description="Run a sequential Skill Memory experiment on CIFAR-100."
     )
     parser.add_argument("--dataset-root", default="data")
     parser.add_argument("--download-only", action="store_true")
-    parser.add_argument("--n-experiences", type=int, default=5)
+    parser.add_argument("--n-experiences", type=int, default=20)
     parser.add_argument(
         "--max-experiences",
         type=int,
@@ -119,23 +121,23 @@ def main() -> None:
     np.random.seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print("Preparing SplitMNIST dataset...")
+    print("Preparing CIFAR-100 dataset...")
     print(f"Dataset root: {args.dataset_root}")
-    benchmark = SplitMNIST(
+    benchmark = SplitCIFAR100(
         n_experiences=args.n_experiences,
         seed=args.seed,
         dataset_root=args.dataset_root,
     )
-    print("SplitMNIST dataset is ready.")
+    print("CIFAR-100 dataset is ready.")
 
     num_experiences = args.max_experiences or len(benchmark.train_stream)
     experience_indices = list(range(num_experiences))
 
     print(
-        "Selected SplitMNIST experiences: "
+        "Selected CIFAR-100 experiences: "
         + ", ".join(str(index) for index in experience_indices)
     )
-    print("=== SplitMNIST Skill Memory experiment ===")
+    print("=== CIFAR-100 Skill Memory experiment ===")
     print("Training method: Skill Memory")
     print(f"Update policy: {args.update_mode}")
     print(
@@ -160,15 +162,15 @@ def main() -> None:
         )
 
     if args.download_only:
-        print(f"SplitMNIST dataset prepared at {args.dataset_root}")
+        print(f"CIFAR-100 dataset prepared at {args.dataset_root}")
         return
 
-    model = SimpleMLP(num_classes=10).to(device)
+    model = SlimResNet18(nclasses=100).to(device)
     strategy = SkillMemoryStrategy(
         model=model,
         optimizer=torch.optim.SGD(model.parameters(), lr=args.learning_rate),
         criterion=nn.CrossEntropyLoss(),
-        max_skills=10,
+        max_skills=100,
         class_train_mode=args.class_train_mode,
         train_samples_per_class=args.train_samples_per_class,
         validation_fraction=args.skill_validation_fraction,
@@ -199,6 +201,7 @@ def main() -> None:
         )
 
         strategy.train(experience)
+
         eval_stream = [
             benchmark.test_stream[index] for index in experience_indices[: step + 1]
         ]
@@ -245,7 +248,7 @@ def main() -> None:
                 strategy.skill_memory_plugin,
                 benchmark.test_stream,
                 experience_index,
-                num_classes=10,
+                num_classes=100,
                 batch_size=args.eval_batch_size,
                 device=device,
                 diagnose=args.diagnose,
@@ -255,7 +258,7 @@ def main() -> None:
                 strategy.skill_memory_plugin,
                 benchmark.test_stream,
                 experience_index,
-                num_classes=10,
+                num_classes=100,
                 routing="probe",
                 batch_size=args.eval_batch_size,
                 device=device,
@@ -274,6 +277,18 @@ def main() -> None:
                     f"timing[{bucket}]: total={stats['total_seconds']:.2f}s "
                     f"calls={stats['calls']} mean={stats['mean_seconds']:.3f}s"
                 )
+
+    if args.diagnose:
+        audit = replay_provenance_report(strategy, diagnose=True)
+        print("replay provenance:")
+        for kind in ("class_training", "refresh"):
+            row = audit[kind]
+            print(
+                f"  {kind}: calls={row['calls']} "
+                f"optimizer_steps={row['optimizer_steps']} "
+                f"historical_examples={row['historical_examples']}"
+            )
+        print(f"  violations: {audit['violations'] or 'none'}")
 
     results = strategy.results()
     final_accuracy = dict(results["final_class_accuracy"])
@@ -296,28 +311,9 @@ def main() -> None:
     print("=== Summary ===")
     print("update_policy=", args.update_mode)
     print("mean_forgetting=", f"{mean_forgetting:.4f}")
-    print(
-        "mean_final_accuracy (calibrated)=",
-        f"{results['mean_final_accuracy']:.4f}",
-    )
-    print(
-        "raw_mean_final_accuracy=",
-        f"{results['raw_mean_final_accuracy']:.4f}",
-    )
+    print("mean_final_accuracy=", f"{results['mean_final_accuracy']:.4f}")
+    print("raw_mean_final_accuracy=", f"{results['raw_mean_final_accuracy']:.4f}")
     print("mean_final_loss=", f"{results['mean_final_loss']:.4f}")
-
-    if args.diagnose:
-        audit = replay_provenance_report(strategy, diagnose=True)
-        print("replay provenance:")
-        for kind in ("class_training", "refresh"):
-            row = audit[kind]
-            print(
-                f"  {kind}: calls={row['calls']} "
-                f"optimizer_steps={row['optimizer_steps']} "
-                f"historical_examples={row['historical_examples']}"
-            )
-        print(f"  violations: {audit['violations'] or 'none'}")
-
     print("final_class_accuracy:")
     for class_id, accuracy in final_accuracy.items():
         print(f"  class {class_id}: {accuracy:.4f}")

@@ -20,6 +20,12 @@ from dataclasses import dataclass
 
 from torch import Tensor
 
+#: Metadata key under which a skill stores its **calibration hold-out**:
+#: ``{class_id: (inputs, targets)}`` examples that were excluded from training
+#: and are used *only* to fit the verifier's Platt calibration. They are not
+#: replay data and are never trained on.
+CALIBRATION_EXAMPLES_KEY = "calibration_examples_by_class"
+
 
 class SkillMemory:
     """Bounded, index-addressed storage for independent skill snapshots."""
@@ -85,7 +91,6 @@ class ClassRecord:
     decision: str
     skill: int
     new_score: float = 0.0
-    old_score: float = 0.0
     old_accuracy: float = 0.0
     new_accuracy: float = 0.0
 

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import weakref
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -92,6 +93,36 @@ def _dataset_labels(dataset: Dataset) -> list[int]:
     except TypeError:
         pass
     return labels
+
+
+_CLASS_SET_CACHE: weakref.WeakKeyDictionary[Any, frozenset[int]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _dataset_class_set(dataset: Dataset) -> frozenset[int]:
+    """Return the set of labels present in `dataset` (cached per dataset)."""
+    try:
+        cached = _CLASS_SET_CACHE.get(dataset)
+    except TypeError:
+        cached = None
+    if cached is not None:
+        return cached
+    classes = frozenset(_dataset_labels(dataset))
+    try:
+        _CLASS_SET_CACHE[dataset] = classes
+    except TypeError:
+        pass
+    return classes
+
+
+def experience_has_class(experience, target_class: int) -> bool:
+    """Return whether `experience.dataset` contains any `target_class` sample.
+
+    O(1) after the first call per dataset, unlike ``class_indices`` which
+    rebuilds an index list on every call.
+    """
+    return int(target_class) in _dataset_class_set(experience.dataset)
 
 
 def classes_in_experience(experience) -> list[int]:
@@ -485,6 +516,17 @@ def prepare_for_experience(model: nn.Module, experience) -> None:
     avalanche_model_adaptation(model, experience)
 
 
+def prepare_for_classes(model: nn.Module, classes: set[int]) -> None:
+    """Grow incremental classifier heads to cover explicit global classes."""
+    if not classes:
+        return
+
+    class _ClassSetExperience:
+        classes_in_this_experience = sorted(classes)
+
+    prepare_for_experience(model, _ClassSetExperience())
+
+
 def predict_logits(
     model: nn.Module, state_dict: Mapping[str, Tensor], x: Tensor
 ) -> Tensor:
@@ -510,6 +552,278 @@ def predict_logits(
         model.train(was_training)
 
 
+@dataclass
+class _CachedState:
+    """One cached functional parameter dict plus the snapshot it came from."""
+
+    source: Mapping[str, Tensor]
+    params: dict[str, Tensor]
+
+
+class FunctionalStateCache:
+    """Cache of functionally-expanded skill states, valid for one decision phase.
+
+    :func:`_functional_growth_for_experience` rebuilds a full parameter dict
+    (and, when the head must grow, a fresh ``nn.Linear``) for every probe.
+    Within one training experience the same stored skill is probed many
+    times against experiences that need the *same* classifier growth, so
+    the result is identical every time. This cache stores it once, already
+    moved to the compute device.
+
+    Exactness rules -- the cache never changes a result:
+
+    * Entries are keyed by ``(slot, sorted experience classes, seed)`` and
+      each entry remembers the *identity* of the snapshot it was built
+      from. ``SkillMemory.store`` always installs a brand-new dict, so an
+      updated skill can never be served a stale entry.
+    * Only seeded probes are cached. With ``seed=None`` the temporary
+      classifier rows are random *by design*, so every call bypasses the
+      cache and behaves exactly as before.
+    * The cached tensors are only ever read by ``functional_call``.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple, _CachedState] = {}
+        self.hits = 0
+        self.misses = 0
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def invalidate(self, slot: int) -> None:
+        """Drop every entry built from `slot` (called when it is re-stored)."""
+        for key in [key for key in self._entries if key[0] == slot]:
+            del self._entries[key]
+
+    def get(
+        self,
+        model: nn.Module,
+        slot: int,
+        state_dict: Mapping[str, Tensor],
+        experience,
+        *,
+        seed: int | None,
+    ) -> dict[str, Tensor]:
+        """Return device-resident probe parameters for `slot` under `experience`."""
+        device = next(model.parameters()).device
+        if seed is None:
+            params = _functional_growth_for_experience(
+                model, state_dict, experience, seed=None
+            )
+            return {key: value.to(device) for key, value in params.items()}
+
+        classes = tuple(
+            sorted(
+                int(c) for c in getattr(experience, "classes_in_this_experience", ())
+            )
+        )
+        key = (slot, classes, int(seed), str(device))
+        entry = self._entries.get(key)
+        if entry is not None and entry.source is state_dict:
+            self.hits += 1
+            return entry.params
+
+        self.misses += 1
+        params = _functional_growth_for_experience(
+            model, state_dict, experience, seed=seed
+        )
+        params = {name: value.to(device) for name, value in params.items()}
+        self._entries[key] = _CachedState(source=state_dict, params=params)
+        return params
+
+
+def _probe_params(
+    model: nn.Module,
+    state_dict: Mapping[str, Tensor],
+    experience,
+    seed: int | None,
+    cache: FunctionalStateCache | None,
+    slot: int | None,
+) -> dict[str, Tensor]:
+    if cache is not None and slot is not None:
+        return cache.get(model, slot, state_dict, experience, seed=seed)
+    params = _functional_growth_for_experience(model, state_dict, experience, seed=seed)
+    device = next(model.parameters()).device
+    return {key: value.to(device) for key, value in params.items()}
+
+
+def _forward_metrics(logits: Tensor, targets: Tensor) -> tuple[float, float, float]:
+    """(loss, score, accuracy) for one skill's logits -- shared by every evaluator.
+
+    Kept as one function so the sequential and batched code paths can never
+    silently drift apart: both end up calling exactly this.
+    """
+    loss = torch.nn.functional.cross_entropy(logits, targets)
+    probabilities = torch.softmax(logits, dim=1)
+    score = probabilities.gather(1, targets.view(-1, 1)).mean()
+    accuracy = logits.argmax(dim=1).eq(targets).float().mean()
+    return float(loss.item()), float(score.item()), float(accuracy.item())
+
+
+def evaluate_state_accuracy(
+    model: nn.Module,
+    state_dict: Mapping[str, Tensor],
+    x: Tensor,
+    y: Tensor,
+    experience,
+    *,
+    seed: int | None = None,
+    cache: FunctionalStateCache | None = None,
+    slot: int | None = None,
+) -> float:
+    """Return only top-1 accuracy of a frozen skill snapshot on a probe batch.
+
+    Numerically identical to the ``accuracy`` that :func:`evaluate_state`
+    returns, but skips the loss and softmax/score computation. Used for
+    old-class *safety* checks, whose decision rule reads accuracy only.
+    """
+    params = _probe_params(model, state_dict, experience, seed, cache, slot)
+    was_training = model.training
+    model.eval()
+    try:
+        device = next(model.parameters()).device
+        with torch.no_grad():
+            logits = torch.func.functional_call(model, params, (x.to(device),))
+            targets = y.to(device)
+            return float(logits.argmax(dim=1).eq(targets).float().mean().item())
+    finally:
+        model.train(was_training)
+
+
+def _param_shape_signature(params: Mapping[str, Tensor]) -> tuple:
+    """A hashable fingerprint of every tensor's `(shape, dtype)` in `params`.
+
+    Two skills with the same signature have parameter/buffer dicts that can
+    be `torch.stack`-ed key-for-key: identical keys, and every tensor at each
+    key has the identical shape and dtype (values may of course differ).
+    Skills whose growth (see `_functional_growth_for_experience`) leaves a
+    *wider* `IncrementalClassifier` than others -- which happens whenever a
+    stored skill was last updated after a later, larger-class-id experience
+    than the one currently being probed -- fall into a different group and
+    are never stacked with the rest.
+    """
+    return tuple(
+        (key, tuple(value.shape), value.dtype) for key, value in sorted(params.items())
+    )
+
+
+def evaluate_states_batch(
+    model: nn.Module,
+    states: list[tuple[Any, Mapping[str, Tensor]]],
+    x: Tensor,
+    y: Tensor,
+    experience,
+    *,
+    seed: int | None = None,
+    cache: FunctionalStateCache | None = None,
+    chunk_size: int | None = None,
+) -> dict[Any, tuple[float, float, float]]:
+    """Batched, GPU-parallel equivalent of calling :func:`evaluate_state` once
+    per ``(key, state_dict)`` pair in `states`, all against the same `(x, y)`.
+
+    Returns ``{key: (loss, score, accuracy)}``, one entry per input pair, with
+    values that are the *same computation* as the sequential per-skill
+    ``evaluate_state`` loop -- not an approximation. Skills are grouped by
+    :func:`_param_shape_signature` (see there for why two skills' expanded
+    states can differ in shape) and each group of 2+ same-shaped skills is
+    evaluated in one call via ``torch.func.functional_call`` stacked over the
+    skill dimension and mapped with :func:`torch.vmap`, following the
+    ensembling pattern in the PyTorch ``torch.func`` migration guide
+    (https://docs.pytorch.org/docs/stable/func.migrating.html). A group of
+    exactly 1 skill is evaluated with the ordinary sequential path -- vmap has
+    per-call overhead of its own that a single skill cannot amortize.
+
+    Numerically, results agree with the sequential path up to ordinary
+    float32 matmul-reassociation noise (empirically ~1e-6 absolute on logits
+    for a small batchnorm+conv model; see
+    ``tests/test_stage1_batching.py::test_batched_matches_sequential_reference``).
+    This does not change routing decisions: `score_class_against_skills` only
+    ever compares these values against each other and against fixed
+    thresholds several orders of magnitude coarser than that noise floor.
+
+    `chunk_size` bounds how many skills' worth of activations exist at once
+    (forwarded to ``torch.vmap``); pass a smaller value if a group is large
+    enough to risk exhausting device memory. `None` (default) runs the whole
+    group as a single vmap call.
+
+    Whether this is actually *faster* than the sequential loop is
+    hardware- and kernel-dependent -- see
+    ``skill_memory/benchmarks/stage1_batching.py``. It is not a formality:
+    functorch's batching rules do not always map to fused kernels, so this
+    should be benchmarked on the target device before being enabled by
+    default (see ``SkillMemoryPlugin(batch_stage1=...)``).
+    """
+    device = next(model.parameters()).device
+    targets = y.to(device)
+    x = x.to(device)
+
+    groups: dict[tuple, list[tuple[Any, dict[str, Tensor]]]] = {}
+    for key, state_dict in states:
+        params = _probe_params(model, state_dict, experience, seed, cache, key)
+        groups.setdefault(_param_shape_signature(params), []).append((key, params))
+
+    results: dict[Any, tuple[float, float, float]] = {}
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for members in groups.values():
+                if len(members) == 1:
+                    key, params = members[0]
+                    logits = torch.func.functional_call(model, params, (x,))
+                    results[key] = _forward_metrics(logits, targets)
+                    continue
+
+                keys = [key for key, _ in members]
+                param_names = members[0][1].keys()
+                stacked = {
+                    name: torch.stack([params[name] for _, params in members])
+                    for name in param_names
+                }
+
+                def call(one_skill_params: dict[str, Tensor]) -> Tensor:
+                    return torch.func.functional_call(model, one_skill_params, (x,))
+
+                batched_logits = torch.vmap(call, chunk_size=chunk_size)(stacked)
+                n_group = batched_logits.shape[0]
+                n_samples = targets.shape[0]
+                flat_logits = batched_logits.reshape(n_group * n_samples, -1)
+                flat_targets = targets.unsqueeze(0).expand(n_group, -1).reshape(-1)
+                losses = (
+                    torch.nn.functional.cross_entropy(
+                        flat_logits, flat_targets, reduction="none"
+                    )
+                    .view(n_group, n_samples)
+                    .mean(dim=1)
+                )
+                probabilities = torch.softmax(batched_logits, dim=2)
+                scores = (
+                    probabilities.gather(
+                        2, targets.view(1, -1, 1).expand(n_group, -1, 1)
+                    )
+                    .squeeze(2)
+                    .mean(dim=1)
+                )
+                accuracies = (
+                    (batched_logits.argmax(dim=2) == targets.view(1, -1))
+                    .float()
+                    .mean(dim=1)
+                )
+                for index, key in enumerate(keys):
+                    results[key] = (
+                        float(losses[index].item()),
+                        float(scores[index].item()),
+                        float(accuracies[index].item()),
+                    )
+    finally:
+        model.train(was_training)
+
+    return results
+
+
 def evaluate_state(
     model: nn.Module,
     state_dict: Mapping[str, Tensor],
@@ -519,6 +833,8 @@ def evaluate_state(
     experience,
     *,
     seed: int | None = None,
+    cache: FunctionalStateCache | None = None,
+    slot: int | None = None,
 ) -> tuple[float, float, float]:
     r"""Score one frozen skill snapshot against a probe batch, with no training.
 
@@ -555,17 +871,11 @@ def evaluate_state(
     places on the true label -- is what `find_best_skill`'s `score_floor`
     thresholds; `accuracy` is a plain top-1 accuracy over the same batch.
     """
-    params = _functional_growth_for_experience(
-        model,
-        state_dict,
-        experience,
-        seed=seed,
-    )
+    params = _probe_params(model, state_dict, experience, seed, cache, slot)
     was_training = model.training
     model.eval()
     try:
         device = next(model.parameters()).device
-        params = {key: value.to(device) for key, value in params.items()}
         with torch.no_grad():
             logits = torch.func.functional_call(model, params, (x.to(device),))
             targets = y.to(device)

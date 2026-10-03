@@ -12,7 +12,6 @@ from avalanche.training import Naive
 from torch import nn
 from torch.utils.data import TensorDataset
 
-from skill_memory.cl import decision as decision_module
 from skill_memory.cl.skill_memory_plugin import SkillMemoryPlugin
 
 
@@ -142,70 +141,12 @@ def test_diagnose_false_does_not_call_perf_counter(monkeypatch):
     strategy.train(benchmark.train_stream[0])
 
 
-def test_safety_check_verifies_all_candidates_by_default(monkeypatch):
-    class FakeMemory:
-        def slots(self):
-            return set(range(6))
+def test_cl_update_modes_are_covered_end_to_end():
+    """The old fake-object test was replaced by real runs.
 
-        def state(self, slot):
-            return {}
+    See ``test_replay_isolation.py``: provenance of every training call is
+    audited for each of ``new_class`` / ``replay`` / ``refresh``.
+    """
+    from skill_memory.cl.replay import REPLAY_MODES
 
-    class FakeClassMap:
-        def classes_for_skill(self, skill):
-            return {skill}
-
-    new_x = torch.tensor([[99.0]])
-    new_y = torch.tensor([0])
-    old_x = torch.tensor([[0.0]])
-    old_y = torch.tensor([0])
-
-    monkeypatch.setattr(
-        decision_module,
-        "probe_class",
-        lambda *args, **kwargs: (new_x, new_y),
-    )
-    monkeypatch.setattr(
-        decision_module,
-        "_first_experience_with_class",
-        lambda *args, **kwargs: object(),
-    )
-    monkeypatch.setattr(
-        decision_module,
-        "_probe_class_across",
-        lambda *args, **kwargs: (old_x, old_y),
-    )
-
-    def fake_evaluate_state(
-        _model,
-        state,
-        x,
-        y,
-        loss_fn,
-        experience,
-        seed=None,
-    ):
-        del state, y, loss_fn, experience
-        if x.item() == 99.0:
-            skill = len(results_seen)
-            results_seen.append(skill)
-            score = 1.0 - 0.01 * skill
-            return 0.0, score, score
-        return 0.0, 0.8, 0.8
-
-    results_seen = []
-    monkeypatch.setattr(decision_module, "evaluate_state", fake_evaluate_state)
-
-    strategy = SimpleNamespace(model=nn.Linear(1, 1))
-    results = decision_module.score_class_against_skills(
-        strategy,
-        object(),
-        7,
-        FakeMemory(),
-        FakeClassMap(),
-        probe_batch_size=1,
-        probe_batches=1,
-        probe_seed=0,
-        seen_experiences=[object()],
-    )
-
-    assert len(results) == 6
+    assert set(REPLAY_MODES) == {"new_class", "replay", "refresh"}

@@ -26,6 +26,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import torch
 from avalanche.training.plugins.strategy_plugin import SupervisedPlugin
 
 from ..diagnostics.timing import TimingAccumulator
@@ -33,12 +34,26 @@ from ..utils.probing import (
     apply_skill_state_exact,
     classes_in_experience,
     origin_experience,
+    prepare_for_classes,
     prepare_for_experience,
     restore_initial_state,
 )
-from .decision import decide_class
-from .skill_registry import ClassRecord, ExperienceClassMap, SkillMemory
-from .training import train_on_class
+from ..utils.protocol_guard import assert_training_experience
+from .decision import DEFAULT_MAX_SAFETY_CANDIDATES, DecisionProbeCache, decide_class
+from .replay import ReplayPolicy, validate_policies
+from .skill_registry import (
+    CALIBRATION_EXAMPLES_KEY,
+    ClassRecord,
+    ExperienceClassMap,
+    SkillMemory,
+)
+from .training import (
+    VALID_CLASS_TRAIN_MODES,
+    TrainingResult,
+    derive_seed,
+    train_on_class,
+    train_skill_on_domain,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +67,7 @@ class SkillMemoryPlugin(SupervisedPlugin):
     #: `skill_memory.diagnostics.timing_report`).
     TIMING_DECISION = "skill_memory_decision_probing"
     TIMING_CLASS_TRAINING = "skill_memory_class_training"
+    TIMING_DOMAIN_REFRESH = "skill_memory_domain_refresh"
 
     def __init__(
         self,
@@ -63,14 +79,26 @@ class SkillMemoryPlugin(SupervisedPlugin):
         probe_batch_size: int = 64,
         probe_batches: int = 5,
         probe_seed: int | None = None,
-        max_safety_candidates: int | None = None,
+        max_safety_candidates: int | None = DEFAULT_MAX_SAFETY_CANDIDATES,
         class_train_epochs: int = 1,
         class_train_batch_size: int = 64,
+        class_train_mode: str = "multiclass",
+        samples_per_class: int | None = None,
+        validation_fraction: float = 0.2,
+        validation_seed: int = 0,
         reuse_is_mutable: bool = True,
         skill_name: Callable | None = None,
         force_decision: str | None = None,
         verbose: bool = True,
         diagnose: bool = False,
+        strict_protocol: bool = True,
+        binary_negative_pool=None,
+        allow_offline_negative_pool: bool = False,
+        update_mode: str = "replay",
+        replay_samples_per_class: int | None = None,
+        training_seed: int = 0,
+        batch_stage1: bool = False,
+        stage1_chunk_size: int | None = None,
     ):
         """Configure per-class REUSE/SCRATCH decisions.
 
@@ -82,6 +110,29 @@ class SkillMemoryPlugin(SupervisedPlugin):
         (see `skill_memory.diagnostics.timing_report`)
         -- it defaults to `False` so a production run never pays even the
         cost of `time.perf_counter()` calls it will not read back.
+
+        `max_safety_candidates` bounds how many top-ranked skills have their
+        old classes verified per new class (default 5; ``None`` verifies
+        every skill exactly). `strict_protocol` enables cheap leakage guards
+        (see `skill_memory.utils.protocol_guard`): training on a test-stream
+        experience raises instead of silently contaminating the evaluation.
+
+        Historical-data semantics (see :mod:`skill_memory.cl.replay`)
+        --------------------------------------------------------------
+        ``update_mode`` selects the complete training policy:
+        ``new_class`` uses no retained history; ``replay`` uses retained
+        history for incoming classes; ``refresh`` does the same replay update
+        and additionally refreshes pre-existing skills on the enlarged domain.
+        ``replay_samples_per_class=None`` means all retained examples, while
+        an integer applies a deterministic per-class replay cap.
+
+        ``binary_negative_pool`` is an offline *oracle* data source, not a
+        continual-learning mode; it is rejected unless
+        ``allow_offline_negative_pool=True`` and never combines with
+        ``new_class``.
+
+        ``training_seed`` seeds mini-batch order and balanced re-sampling, so
+        a run is reproducible irrespective of the global torch RNG.
         """
         super().__init__()
         if force_decision not in (None, self.REUSE, self.SCRATCH):
@@ -99,13 +150,46 @@ class SkillMemoryPlugin(SupervisedPlugin):
         self.max_safety_candidates = (
             None if max_safety_candidates is None else int(max_safety_candidates)
         )
+        self.batch_stage1 = bool(batch_stage1)
+        self.stage1_chunk_size = stage1_chunk_size
+        if class_train_mode not in VALID_CLASS_TRAIN_MODES:
+            raise ValueError(
+                f"class_train_mode must be one of {VALID_CLASS_TRAIN_MODES}"
+            )
         self.class_train_epochs = class_train_epochs
         self.class_train_batch_size = class_train_batch_size
+        self.class_train_mode = class_train_mode
+        if samples_per_class is not None and samples_per_class <= 0:
+            raise ValueError("samples_per_class must be positive")
+        self.samples_per_class = (
+            None if samples_per_class is None else int(samples_per_class)
+        )
+        if not 0.0 <= validation_fraction < 1.0:
+            raise ValueError("validation_fraction must be in [0, 1)")
+        self.validation_fraction = float(validation_fraction)
+        self.validation_seed = int(validation_seed)
         self.reuse_is_mutable = reuse_is_mutable
         self.skill_name = skill_name
         self.force_decision = force_decision
         self.verbose = verbose
         self.diagnose = bool(diagnose)
+        self.strict_protocol = bool(strict_protocol)
+        self.binary_negative_pool = binary_negative_pool
+        self.allow_offline_negative_pool = bool(allow_offline_negative_pool)
+        self.replay_policy = ReplayPolicy(update_mode, replay_samples_per_class)
+        validate_policies(
+            self.replay_policy,
+            class_train_mode=self.class_train_mode,
+            has_offline_pool=bool(binary_negative_pool),
+            allow_offline_negative_pool=self.allow_offline_negative_pool,
+        )
+        # Public, read-only views kept for backwards compatibility.
+        self.update_mode = self.replay_policy.mode
+        self.replay_samples_per_class = self.replay_policy.per_class
+        self.training_seed = int(training_seed)
+        #: One ``TrainingProvenance.as_dict()`` (+ context) per training call.
+        self.training_log: list[dict[str, Any]] = []
+        self._probe_cache = DecisionProbeCache()
 
         self.last_class_decisions: dict[int, dict[int, dict[str, Any]]] = {}
         self.timing = TimingAccumulator(enabled=self.diagnose)
@@ -115,6 +199,7 @@ class SkillMemoryPlugin(SupervisedPlugin):
         self._training_experience_count = 0
         self._current_training_experience_index: int | None = None
         self._original_train_epochs: int | None = None
+        self._new_skills_this_experience: set[int] = set()
         self._pre_eval_state: dict | None = None
         self._eval_active = False
 
@@ -219,6 +304,8 @@ class SkillMemoryPlugin(SupervisedPlugin):
         """
         experience = strategy.experience
         first_subexp = self._is_first_subexp(experience)
+        if self.strict_protocol:
+            assert_training_experience(experience)
 
         # A logical Avalanche experience can be split into sub-experiences.
         # The old implementation processed ONLY the first sub-experience,
@@ -240,6 +327,7 @@ class SkillMemoryPlugin(SupervisedPlugin):
                 self._initial_state = self._snapshot(strategy.model)
 
             self.last_class_decisions[experience_index] = {}
+            self._new_skills_this_experience = set()
 
             # Never let Avalanche's normal mixed-experience loop retrain the
             # data after our explicit class-by-class loop.
@@ -267,7 +355,21 @@ class SkillMemoryPlugin(SupervisedPlugin):
             )
             return
 
+        policy = self.replay_policy
+        historical_memory = policy.retained_for_training(self.retained_memory)
+        self._log(
+            f"Class-training update policy: {policy.describe()}"
+        )
+
         for target_class in classes:
+            if self.class_train_mode == "binary_one_vs_rest":
+                negatives = self._binary_negative_classes(
+                    classes, target_class, historical_memory
+                )
+                self._log(
+                    f"Class {target_class}: binary YES/NO training "
+                    f"positive={target_class}, negatives={negatives}"
+                )
             decision_start = time.perf_counter() if self.diagnose else None
             with self.timing.track(self.TIMING_DECISION):
                 decision = decide_class(
@@ -285,6 +387,9 @@ class SkillMemoryPlugin(SupervisedPlugin):
                     self.force_decision,
                     self._log,
                     max_safety_candidates=self.max_safety_candidates,
+                    probe_cache=self._probe_cache,
+                    batch_stage1=self.batch_stage1,
+                    stage1_chunk_size=self.stage1_chunk_size,
                 )
             if decision_start is not None:
                 self._log(
@@ -316,23 +421,29 @@ class SkillMemoryPlugin(SupervisedPlugin):
                 self._reset_optimizer(strategy, group_by_name)
 
                 if self.reuse_is_mutable:
-                    with self.timing.track(self.TIMING_CLASS_TRAINING):
-                        train_on_class(
-                            strategy,
-                            experience,
-                            target_class,
-                            self.class_train_epochs,
-                            self.class_train_batch_size,
-                        )
+                    result = self._train_class(
+                        strategy,
+                        experience,
+                        experience_index,
+                        target_class,
+                        historical_memory,
+                    )
+                    previous_metadata = self.memory.metadata(skill)
                     self.memory.store(
                         skill,
                         strategy.model.state_dict(),
                         metadata={
-                            **self.memory.metadata(skill),
+                            **previous_metadata,
                             "last_updated_class": target_class,
                             "last_updated_experience": experience_index,
+                            "class_train_mode": self.class_train_mode,
+                            CALIBRATION_EXAMPLES_KEY: self._merge_calibration(
+                                previous_metadata.get(CALIBRATION_EXAMPLES_KEY),
+                                result,
+                            ),
                         },
                     )
+                    self._probe_cache.invalidate_skill(skill)
                     self._log(f"Class {target_class}: skill {skill} updated in place")
                 else:
                     self._log(f"Class {target_class}: skill {skill} left unchanged")
@@ -340,14 +451,13 @@ class SkillMemoryPlugin(SupervisedPlugin):
                 skill = self.memory.allocate()
                 self._log(f"Class {target_class}: SCRATCH -> new skill {skill}")
                 self._scratch_reset(strategy, experience)
-                with self.timing.track(self.TIMING_CLASS_TRAINING):
-                    train_on_class(
-                        strategy,
-                        experience,
-                        target_class,
-                        self.class_train_epochs,
-                        self.class_train_batch_size,
-                    )
+                result = self._train_class(
+                    strategy,
+                    experience,
+                    experience_index,
+                    target_class,
+                    historical_memory,
+                )
                 self.memory.store(
                     skill,
                     strategy.model.state_dict(),
@@ -358,9 +468,12 @@ class SkillMemoryPlugin(SupervisedPlugin):
                         "probe_batch_size": self.probe_batch_size,
                         "probe_batches": self.probe_batches,
                         "probe_seed": self.probe_seed,
+                        "class_train_mode": self.class_train_mode,
+                        CALIBRATION_EXAMPLES_KEY: self._merge_calibration(None, result),
                     },
                 )
                 decision["skill"] = skill
+                self._new_skills_this_experience.add(skill)
 
             self.last_class_decisions[experience_index][target_class] = decision
             self.class_map.record(
@@ -370,10 +483,190 @@ class SkillMemoryPlugin(SupervisedPlugin):
                     decision=decision["decision"],
                     skill=decision["skill"],
                     new_score=decision.get("new_score", 0.0),
-                    old_score=decision.get("old_score", 0.0),
                     old_accuracy=decision.get("old_accuracy", 0.0),
                     new_accuracy=decision.get("new_accuracy", 0.0),
                 )
+            )
+
+    # ------------------------------------------------------------------
+    # TRAINING HELPERS
+    # ------------------------------------------------------------------
+
+    @property
+    def retained_memory(self):
+        """Bounded per-class examples retained from *previous* experiences.
+
+        The base plugin retains nothing; ``EvaluationMemoryPlugin`` overrides
+        this with its frozen evaluation memory.
+        """
+        return ()
+
+    def _binary_negative_classes(
+        self, current_classes, target_class: int, historical_memory
+    ) -> list[int]:
+        """Classes that act as negatives for ``target_class`` (for logging)."""
+        seen = set(current_classes)
+        for source in (historical_memory, self.binary_negative_pool):
+            seen.update(int(item.class_id) for item in (source or ()))
+        return sorted(c for c in seen if c != target_class)
+
+    @staticmethod
+    def _merge_calibration(previous, result: TrainingResult) -> dict:
+        """Merge a call's hold-out into the per-class calibration examples.
+
+        The hold-out is **calibration data only** (Platt scaling of the
+        verifier); it was excluded from training and is never replayed.
+        """
+        merged = dict(previous or {})
+        targets = result.validation_targets
+        for class_id in torch.unique(targets).tolist():
+            mask = targets == int(class_id)
+            merged[int(class_id)] = (
+                result.validation_inputs[mask].clone(),
+                targets[mask].clone(),
+            )
+        return merged
+
+    def _record_training(self, experience_index: int, result: TrainingResult) -> None:
+        entry = result.provenance.as_dict()
+        entry.update(
+            experience_index=experience_index,
+            update_mode=self.replay_policy.mode,
+            replay_samples_per_class=self.replay_policy.per_class,
+        )
+        self.training_log.append(entry)
+
+    def _train_class(
+        self,
+        strategy,
+        experience,
+        experience_index: int,
+        target_class: int,
+        historical_memory,
+    ) -> TrainingResult:
+        """Train one class under the replay policy and log its provenance."""
+        policy = self.replay_policy
+        with self.timing.track(self.TIMING_CLASS_TRAINING):
+            result = train_on_class(
+                strategy,
+                experience,
+                target_class,
+                self.class_train_epochs,
+                self.class_train_batch_size,
+                mode=self.class_train_mode,
+                validation_fraction=self.validation_fraction,
+                validation_seed=self.validation_seed,
+                retained_memory=historical_memory,
+                negative_pool=self.binary_negative_pool,
+                samples_per_class=self.samples_per_class,
+                historical_samples_per_class=policy.historical_limit,
+                sampler_seed=derive_seed(
+                    self.training_seed, experience_index, target_class
+                ),
+            )
+        self._record_training(experience_index, result)
+        return result
+
+    def _refresh_existing_skills(self, strategy, experience, experience_index) -> None:
+        r"""Retrain pre-existing binary skills on the enlarged class domain.
+
+        Runs only when ``update_mode="refresh"``. With :math:`S`
+        pre-existing skills the cost is
+        :math:`S` extra training passes for this experience; skills created
+        in this very experience were already trained on the observed domain
+        and are skipped.  Historical data enters under the replay policy.
+        """
+        policy = self.replay_policy
+        if policy.mode != "refresh":
+            return
+        if not self.reuse_is_mutable:
+            self._log("Skill refresh skipped: reuse_is_mutable=False")
+            return
+
+        retained_memory = policy.retained_for_training(self.retained_memory)
+        current_classes = set(classes_in_experience(experience))
+        observed_classes = set(current_classes)
+        for skill in self.memory.slots():
+            observed_classes.update(self.class_map.classes_for_skill(skill))
+
+        self._log(
+            f"Skill refresh: policy={policy.describe()}; "
+            f"current_classes={sorted(current_classes)}; "
+            f"historical_classes={sorted(observed_classes - current_classes)}"
+        )
+        if len(observed_classes) < 2:
+            return
+
+        for skill in sorted(self.memory.slots()):
+            owned_classes = self.class_map.classes_for_skill(skill)
+            if not owned_classes:
+                continue
+
+            previous_metadata = self.memory.metadata(skill)
+            if skill in self._new_skills_this_experience:
+                self.memory.store(
+                    skill,
+                    self.memory.state(skill),
+                    metadata={
+                        **previous_metadata,
+                        "domain_classes": sorted(observed_classes),
+                        "domain_update_experience": experience_index,
+                    },
+                )
+                self._log(
+                    f"Skill refresh: skill {skill} already trained on the "
+                    "current observed domain; skipping"
+                )
+                continue
+
+            if set(previous_metadata.get("domain_classes", [])) == observed_classes:
+                self._log(
+                    f"Skill refresh: skill {skill} already covers the "
+                    "observed domain; skipping"
+                )
+                continue
+
+            group_by_name = self._capture_optimizer_groups(strategy)
+            apply_skill_state_exact(strategy.model, self.memory.state(skill))
+            prepare_for_classes(strategy.model, observed_classes)
+            self._reset_optimizer(strategy, group_by_name)
+
+            with self.timing.track(self.TIMING_DOMAIN_REFRESH):
+                result = train_skill_on_domain(
+                    strategy,
+                    experience,
+                    owned_classes,
+                    observed_classes,
+                    self.class_train_epochs,
+                    self.class_train_batch_size,
+                    validation_fraction=self.validation_fraction,
+                    validation_seed=self.validation_seed,
+                    retained_memory=retained_memory,
+                    samples_per_class=self.samples_per_class,
+                    historical_samples_per_class=policy.historical_limit,
+                    sampler_seed=derive_seed(
+                        self.training_seed, experience_index, skill, 7919
+                    ),
+                )
+            self._record_training(experience_index, result)
+
+            self.memory.store(
+                skill,
+                strategy.model.state_dict(),
+                metadata={
+                    **previous_metadata,
+                    "domain_update_experience": experience_index,
+                    "domain_classes": sorted(observed_classes),
+                    CALIBRATION_EXAMPLES_KEY: self._merge_calibration(
+                        previous_metadata.get(CALIBRATION_EXAMPLES_KEY), result
+                    ),
+                },
+            )
+            self._probe_cache.invalidate_skill(skill)
+            self._log(
+                f"Skill refresh: skill {skill} (owns {sorted(owned_classes)}) "
+                f"retrained on domain {sorted(observed_classes)}; "
+                f"counts={result.provenance.retained}"
             )
 
     def after_training_exp(self, strategy, **kwargs) -> None:
@@ -410,10 +703,17 @@ class SkillMemoryPlugin(SupervisedPlugin):
             )
         )
 
+        self._refresh_existing_skills(strategy, experience, experience_index)
+
+        self._new_skills_this_experience = set()
+
         if self._original_train_epochs is not None:
             strategy.train_epochs = self._original_train_epochs
         self._original_train_epochs = None
         self._seen_experiences.append(origin_experience(experience))
+        # Skill states change as training proceeds; old-class probes stay
+        # valid (their cache keys encode the exact pool they came from).
+        self._probe_cache.end_of_experience()
         self._current_training_experience_index = None
         self._task_active = False
 
@@ -429,9 +729,8 @@ class SkillMemoryPlugin(SupervisedPlugin):
     def before_eval_exp(self, strategy, **kwargs) -> None:
         """Prepare an evaluation experience.
 
-        Skill Memory does not route evaluation samples here. Anonymous
-        evaluation routing, when enabled, is owned by the independent ML
-        evaluator.
+        Skill Memory does not route evaluation samples here; prediction is
+        owned by :class:`~skill_memory.evaluation.cl_evaluator.CLEvaluationPlugin`.
         """
         return
 

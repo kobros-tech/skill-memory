@@ -27,11 +27,7 @@ def _tiny_strategy():
         model=model,
         optimizer=torch.optim.SGD(model.parameters(), lr=0.05),
         criterion=torch.nn.CrossEntropyLoss(),
-        evaluator_model_factory=lambda: SimpleMLP(
-            input_size=6, hidden_size=8, num_classes=4
-        ),
         eval_memory_per_class=5,
-        eval_epochs=1,
         train_mb_size=16,
         train_epochs=1,
         eval_mb_size=16,
@@ -41,7 +37,7 @@ def _tiny_strategy():
     return strategy, benchmark
 
 
-def test_timing_report_has_three_buckets_after_one_train_eval_cycle():
+def test_timing_report_has_the_expected_buckets_after_one_train_eval_cycle():
     strategy, benchmark = _tiny_strategy()
 
     for experience in benchmark.train_stream:
@@ -53,7 +49,7 @@ def test_timing_report_has_three_buckets_after_one_train_eval_cycle():
     assert set(report) == {
         "skill_memory_decision_probing",
         "skill_memory_class_training",
-        "independent_evaluator_and_test_evaluation",
+        "cl_evaluation",
     }
     for metrics in report.values():
         assert metrics["calls"] >= 1
@@ -64,7 +60,21 @@ def test_timing_report_has_three_buckets_after_one_train_eval_cycle():
     assert report["skill_memory_decision_probing"]["calls"] == 4
     assert report["skill_memory_class_training"]["calls"] == 4
     # One strategy.eval() call per experience trained so far.
-    assert report["independent_evaluator_and_test_evaluation"]["calls"] == 2
+    assert report["cl_evaluation"]["calls"] == 2
+
+
+def test_refresh_bucket_appears_only_when_refresh_is_enabled():
+    from skill_memory.tests._helpers import make_benchmark, make_strategy, train_all
+
+    benchmark = make_benchmark(4, 2, 24)
+    plain = train_all(make_strategy(4, diagnose=True), benchmark)
+    assert "skill_memory_domain_refresh" not in timing_report(plain)
+
+    refreshed = train_all(
+        make_strategy(4, diagnose=True, refresh_existing_skills=True), benchmark
+    )
+    report = timing_report(refreshed)
+    assert report["skill_memory_domain_refresh"]["calls"] >= 1
 
 
 def test_reset_timing_clears_every_bucket():
