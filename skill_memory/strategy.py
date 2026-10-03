@@ -19,9 +19,9 @@ Two cooperating components, both owned by :class:`SkillMemoryStrategy`:
    - **trains no evaluator model** and consults no external classifier.
 
 Historical-data semantics are defined once, in :mod:`skill_memory.cl.replay`:
-``cl_update_mode`` (``new_class`` | ``small_replay`` | ``replay``) controls how
+``update_mode`` (``new_class`` | ``small_replay`` | ``replay``) controls how
 much *retained* history enters class training, and the separate
-``refresh_existing_skills`` switch controls whether existing skills are
+``update_mode="refresh"`` controls whether existing skills are
 retrained on the enlarged domain.  ``docs/MATHEMATICS.md`` gives the formulas.
 """
 
@@ -64,17 +64,16 @@ class SkillMemoryStrategy(SupervisedTemplate):
 
     Replay / refresh parameters
     ---------------------------
-    ``cl_update_mode``
+    ``update_mode``
         ``"new_class"``: current-class data only (historical replay = 0);
-        ``"small_replay"``: current class + at most ``cl_replay_per_class``
+        ``"small_replay"``: current class + at most ``replay_samples_per_class``
         retained examples per old class; ``"replay"``: current class + *all
         currently retained* examples per old class.  The retained memory is
-        bounded by ``eval_memory_per_class``, so ``replay`` is not "all
+        bounded by ``memory_per_class``, so ``replay`` is not "all
         historical training data".
-    ``refresh_existing_skills``
-        Independently retrain every pre-existing skill on the enlarged domain
-        after each experience (binary mode; incompatible with ``new_class``).
-        Costs one training pass per skill per experience.
+    ``update_mode="refresh"``
+        Replay incoming classes and additionally retrain every pre-existing skill
+        on the enlarged domain after each experience.
     ``binary_negative_pool`` / ``allow_offline_negative_pool``
         Offline oracle negatives for ablations; rejected unless explicitly
         allowed, and never combined with ``new_class``.
@@ -122,37 +121,51 @@ class SkillMemoryStrategy(SupervisedTemplate):
         validation_seed: int = 0,
         reuse_is_mutable: bool = True,
         force_decision: str | None = None,
-        eval_memory_per_class: int = 20,
-        skill_train_samples_per_class: int | None = None,
-        eval_memory_seed: int = 0,
+        memory_per_class: int = 20,
+        train_samples_per_class: int | None = None,
+        memory_seed: int = 0,
         train_mb_size: int = 64,
-        train_epochs: int = 1,
+        class_train_epochs: int = 1,
         eval_mb_size: int = 64,
         device: torch.device | str | None = None,
         verbose: bool = True,
-        cl_update_mode: str = "replay",
-        cl_replay_per_class: int = 5,
+        update_mode: str = "replay",
+        replay_samples_per_class: int | None = None,
         diagnose: bool = False,
         strict_protocol: bool = True,
         binary_negative_pool=None,
         allow_offline_negative_pool: bool = False,
-        refresh_existing_skills: bool = False,
         training_seed: int = 0,
         batch_stage1: bool = False,
         stage1_chunk_size: int | None = None,
         eval_chunk_size: int = DEFAULT_EVAL_CHUNK_SIZE,
         debug_scores: bool = False,
     ) -> None:
-        if eval_memory_per_class <= 0:
-            raise ValueError("eval_memory_per_class must be positive")
+        if memory_per_class <= 0:
+            raise ValueError("memory_per_class must be positive")
 
-        if skill_train_samples_per_class is None:
-            skill_train_samples_per_class = eval_memory_per_class
-        if skill_train_samples_per_class <= 0:
-            raise ValueError("skill_train_samples_per_class must be positive")
+        if train_samples_per_class is None:
+            train_samples_per_class = memory_per_class
+        if train_samples_per_class <= 0:
+            raise ValueError("train_samples_per_class must be positive")
 
-        if train_epochs < 1:
-            raise ValueError("train_epochs must be at least 1")
+        if replay_samples_per_class is not None and update_mode == "new_class":
+            raise ValueError(
+                "replay_samples_per_class is only valid for replay or refresh"
+            )
+        if (
+            replay_samples_per_class is not None
+            and replay_samples_per_class > memory_per_class
+        ):
+            raise ValueError(
+                "replay_samples_per_class cannot exceed memory_per_class"
+            )
+
+        if update_mode == "refresh" and not reuse_is_mutable:
+            raise ValueError("update_mode=refresh requires reuse_is_mutable=True")
+
+        if class_train_epochs < 1:
+            raise ValueError("class_train_epochs must be at least 1")
 
         if class_train_mode not in VALID_CLASS_TRAIN_MODES:
             raise ValueError(
@@ -165,7 +178,7 @@ class SkillMemoryStrategy(SupervisedTemplate):
             device = torch.device(device)
 
         self.verbose = verbose
-        self.train_epochs = train_epochs
+        self.train_epochs = class_train_epochs
         self.diagnose = bool(diagnose)
         self.timing = TimingAccumulator(enabled=self.diagnose)
 
@@ -186,24 +199,23 @@ class SkillMemoryStrategy(SupervisedTemplate):
             probe_batches=probe_batches,
             probe_seed=probe_seed,
             max_safety_candidates=max_safety_candidates,
-            class_train_epochs=train_epochs,
+            class_train_epochs=class_train_epochs,
             class_train_batch_size=class_train_batch_size,
             class_train_mode=class_train_mode,
-            samples_per_class=skill_train_samples_per_class,
+            samples_per_class=train_samples_per_class,
             validation_fraction=validation_fraction,
             validation_seed=validation_seed,
             reuse_is_mutable=reuse_is_mutable,
             force_decision=force_decision,
-            eval_memory_per_class=eval_memory_per_class,
-            eval_memory_seed=eval_memory_seed,
+            memory_per_class=memory_per_class,
+            memory_seed=memory_seed,
             verbose=verbose,
             diagnose=self.diagnose,
             strict_protocol=strict_protocol,
             binary_negative_pool=binary_negative_pool,
             allow_offline_negative_pool=allow_offline_negative_pool,
-            cl_update_mode=cl_update_mode,
-            cl_replay_per_class=cl_replay_per_class,
-            refresh_existing_skills=refresh_existing_skills,
+            update_mode=update_mode,
+            replay_samples_per_class=replay_samples_per_class,
             training_seed=training_seed,
             batch_stage1=batch_stage1,
             stage1_chunk_size=stage1_chunk_size,
@@ -238,7 +250,7 @@ class SkillMemoryStrategy(SupervisedTemplate):
             criterion=criterion,
             evaluator=evaluator,
             train_mb_size=train_mb_size,
-            train_epochs=train_epochs,
+            train_epochs=class_train_epochs,
             eval_mb_size=eval_mb_size,
             eval_every=eval_every,
             peval_mode=peval_mode,
@@ -270,14 +282,14 @@ class SkillMemoryStrategy(SupervisedTemplate):
     # ------------------------------------------------------------------
 
     @property
-    def cl_update_mode(self) -> str:
-        """Replay mode in force (``new_class`` | ``small_replay`` | ``replay``)."""
-        return self.plugin.cl_update_mode
+    def update_mode(self) -> str:
+        """Complete update policy in force."""
+        return self.plugin.update_mode
 
     @property
-    def cl_replay_per_class(self) -> int:
-        """``K``: the ``small_replay`` per-class cap."""
-        return self.plugin.cl_replay_per_class
+    def replay_samples_per_class(self) -> int | None:
+        """Optional retained-history cap per old class."""
+        return self.plugin.replay_samples_per_class
 
     @property
     def skill_memory(self) -> SkillMemory:

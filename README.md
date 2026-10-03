@@ -93,14 +93,14 @@ deliberately separate so that an experiment changes **one factor at a time**
 
 | Knob | Values | Meaning |
 |---|---|---|
-| `cl_update_mode` | `new_class` | current-class data only — **historical replay = 0** |
-| | `small_replay` | current class + at most `cl_replay_per_class` ($K$) retained examples per old class |
+| `update_mode` | `new_class` | current-class data only — **historical replay = 0** |
+| | `replay` | current class + retained examples per old class; use `replay_samples_per_class` for a finite cap, or `None` for all retained examples |
 | | `replay` (default) | current class + **all currently retained** examples per old class |
-| `refresh_existing_skills` | `False` (default) / `True` | additionally retrain every pre-existing skill on the enlarged domain after each experience (binary mode; needs history, so not with `new_class`) |
+| `update_mode=refresh` | — | replay incoming classes and additionally retrain every pre-existing skill once on the enlarged domain |
 | `binary_negative_pool` | off (default) | offline *oracle* negatives for ablations; needs `allow_offline_negative_pool=True`, obeys the same cap, never combines with `new_class` |
 
 `replay` means *all retained history*, not *all historical training data*:
-the retained memory is bounded by `eval_memory_per_class`.
+the retained memory is bounded by `memory_per_class`.
 
 The `validation_fraction` hold-out is **calibration data** (it fits the
 evaluator's Platt scaling). It is excluded from training and never replayed.
@@ -280,13 +280,12 @@ strategy = SkillMemoryStrategy(
     optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
     criterion=torch.nn.CrossEntropyLoss(),
     class_train_mode="binary_one_vs_rest",
-    cl_update_mode="small_replay",  # new_class | small_replay | replay
-    cl_replay_per_class=5,  # K, used by small_replay
-    refresh_existing_skills=False,  # independent of the replay mode
-    eval_memory_per_class=20,
+    update_mode="replay",  # new_class | replay | refresh
+    replay_samples_per_class=None,  # None = all retained; integer = replay cap
+    memory_per_class=20,
     training_seed=0,  # reproducible training
     train_mb_size=64,
-    train_epochs=1,
+    class_train_epochs=3,
     eval_mb_size=64,
 )
 
@@ -335,8 +334,9 @@ python -m skill_memory.demos.demo_replay_ablation
 python -m skill_memory.demos.demo_replay_ablation --seeds 0 1 2 --json out.json
 ```
 
-Compares `new_class`, `small_replay`, `replay`, and the two replay modes with
-`refresh_existing_skills`, on identical data, initial weights and seeds, and
+Compares the complete `new_class`, `replay`, and `refresh` update policies on
+identical data, initial weights, and seeds, while reporting their different
+training work explicitly.
 prints calibrated/raw accuracy, forgetting, the historical examples consumed,
 the optimiser steps spent on class training vs. refresh, wall time, and the
 number of audit violations (must be `0`). Every row differs from its
@@ -348,12 +348,13 @@ seeds and a real benchmark for that.
 
 ```bash
 python -m skill_memory.demos.demo_splitmnist --n-experiences 5 --train-epochs 1 \
-    --cl-update-mode small_replay --cl-replay-per-class 5 --diagnose
+    --update-mode replay --replay-samples-per-class 5 --diagnose
 python -m skill_memory.demos.demo_cifar100 --help
 ```
 
-Key flags: `--cl-update-mode {new_class,small_replay,replay}`,
-`--cl-replay-per-class`, `--refresh-existing-skills`, `--training-seed`,
+Key demo flags: `--update-mode {new_class,replay,refresh}`,
+`--replay-samples-per-class`, `--train-samples-per-class`,
+`--memory-per-class`, and `--class-train-epochs`.
 `--class-train-mode`, `--diagnose` (also runs the opt-in oracle/probe
 diagnostics and the replay audit; never affects the reported accuracy),
 `--eval-memory-per-class`, `--skill-train-samples-per-class`, `--max-skills`.
@@ -398,7 +399,7 @@ print(timing_report(strategy))
 # {
 #   "skill_memory_decision_probing": {"total_seconds": ..., "calls": ..., "mean_seconds": ...},
 #   "skill_memory_class_training": {"total_seconds": ..., "calls": ..., "mean_seconds": ...},
-#   "skill_memory_domain_refresh": {...},   # only with refresh_existing_skills=True
+#   "skill_memory_domain_refresh": {...},   # only with --update-mode refresh
 #   "cl_evaluation": {"total_seconds": ..., "calls": ..., "mean_seconds": ...},
 # }
 ```
@@ -453,7 +454,7 @@ match is a place where ground truth or diagnostic cost could enter.
   the live model) ever calls `.backward()` using a stored skill's weights.
 - **Replay is isolated and auditable.** `new_class` consumes zero
   historical examples *by construction* (the retained memory is not even
-  passed down), `small_replay` at most $K$ per old class, `replay` the
+  passed down), `replay` at most $K$ per old class when a cap is set, and all retained history
   bounded retained memory; the refresh of existing skills and the offline
   oracle pool are separate, explicit opt-ins. `replay_provenance_report`
   verifies this after every run.

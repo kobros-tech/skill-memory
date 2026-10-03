@@ -65,7 +65,7 @@ def test_training_epochs_are_forwarded():
         model=model,
         optimizer=torch.optim.SGD(model.parameters(), lr=0.05),
         criterion=torch.nn.CrossEntropyLoss(),
-        train_epochs=3,
+        class_train_epochs=3,
     )
     assert strategy.train_epochs == 3
     assert strategy.skill_memory_plugin.class_train_epochs == 3
@@ -81,23 +81,23 @@ def test_public_properties_expose_underlying_components():
 
 def test_replay_configuration_is_exposed_and_forwarded():
     strategy = make_strategy(
-        2, cl_update_mode="small_replay", cl_replay_per_class=7, training_seed=3
+        2, update_mode="replay", replay_samples_per_class=7, training_seed=3
     )
     plugin = strategy.skill_memory_plugin
-    assert strategy.cl_update_mode == plugin.cl_update_mode == "small_replay"
-    assert strategy.cl_replay_per_class == plugin.cl_replay_per_class == 7
+    assert strategy.update_mode == plugin.update_mode == "replay"
+    assert strategy.replay_samples_per_class == plugin.replay_samples_per_class == 7
     assert plugin.replay_policy.historical_limit == 7
-    assert plugin.refresh_policy.enabled is False
     assert plugin.training_seed == 3
 
 
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"cl_update_mode": "everything"},
-        {"cl_update_mode": "small_replay", "cl_replay_per_class": 0},
-        {"cl_update_mode": "new_class", "refresh_existing_skills": True},
-        {"class_train_mode": "multiclass", "refresh_existing_skills": True},
+        {"update_mode": "everything"},
+        {"update_mode": "replay", "replay_samples_per_class": 0},
+        {"update_mode": "new_class", "replay_samples_per_class": 2},
+        {"update_mode": "refresh", "class_train_mode": "multiclass"},
+        {"update_mode": "refresh", "reuse_is_mutable": False},
     ],
 )
 def test_invalid_replay_configuration_fails_at_construction(kwargs):

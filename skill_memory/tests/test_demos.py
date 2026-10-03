@@ -21,21 +21,19 @@ def test_ablation_demo_rows_isolate_one_factor_at_a_time():
     assert list(rows) == [name for name, _, _ in demo.CONFIGURATIONS]
     assert all(r.violations == 0 for r in rows.values())
 
-    # replay quantity: new_class < small_replay < replay (history consumed)
     assert rows["new_class"].historical_examples == 0
     assert (
         0
-        < rows["small_replay"].historical_examples
-        < rows["replay"].historical_examples
+        < rows["replay(K)"].historical_examples
+        < rows["replay(all)"].historical_examples
     )
-    # refresh is the only thing that spends refresh steps
-    for plain in ("new_class", "small_replay", "replay"):
-        assert rows[plain].refresh_steps == 0
-    for refreshed in ("small_replay+refresh", "replay+refresh"):
-        assert rows[refreshed].refresh_steps > 0
-    # ...and it leaves class-training work untouched
-    assert rows["small_replay+refresh"].class_steps == rows["small_replay"].class_steps
-    assert rows["replay+refresh"].class_steps == rows["replay"].class_steps
+    assert rows["new_class"].refresh_steps == 0
+    assert rows["replay(K)"].refresh_steps == 0
+    assert rows["replay(all)"].refresh_steps == 0
+    assert rows["refresh(K)"].refresh_steps > 0
+    assert rows["refresh(all)"].refresh_steps > 0
+    assert rows["refresh(K)"].class_steps == rows["replay(K)"].class_steps
+    assert rows["refresh(all)"].class_steps == rows["replay(all)"].class_steps
 
 
 def test_ablation_demo_cli_writes_json(tmp_path, monkeypatch, capsys):
@@ -60,7 +58,7 @@ def test_ablation_demo_cli_writes_json(tmp_path, monkeypatch, capsys):
 
 
 def test_ablation_demo_is_deterministic():
-    first = demo.run_configuration("replay", False, seed=3, **SMALL)
-    second = demo.run_configuration("replay", False, seed=3, **SMALL)
+    first = demo.run_configuration("replay", "K", seed=3, **SMALL)
+    second = demo.run_configuration("replay", "K", seed=3, **SMALL)
     first.pop("seconds"), second.pop("seconds")
     assert first == second

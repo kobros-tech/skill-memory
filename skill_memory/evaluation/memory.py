@@ -52,15 +52,15 @@ class EvaluationMemoryPlugin(SkillMemoryPlugin):
     def __init__(
         self,
         *args,
-        eval_memory_per_class: int = 20,
-        eval_memory_seed: int = 0,
+        memory_per_class: int = 20,
+        memory_seed: int = 0,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
-        if eval_memory_per_class <= 0:
-            raise ValueError("eval_memory_per_class must be positive")
-        self.eval_memory_per_class = int(eval_memory_per_class)
-        self.eval_memory_seed = int(eval_memory_seed)
+        if memory_per_class <= 0:
+            raise ValueError("memory_per_class must be positive")
+        self.memory_per_class = int(memory_per_class)
+        self.memory_seed = int(memory_seed)
         self.eval_memory: list[EvaluationMemory] = []
 
     @property
@@ -134,13 +134,13 @@ class EvaluationMemoryPlugin(SkillMemoryPlugin):
             )
         )
         generator = torch.Generator()
-        generator.manual_seed(self.eval_memory_seed + experience_index)
+        generator.manual_seed(self.memory_seed + experience_index)
         memories: list[EvaluationMemory] = []
 
         for class_id in sorted(samples_by_class):
             indices = samples_by_class[class_id]
 
-            if len(indices) > self.eval_memory_per_class:
+            if len(indices) > self.memory_per_class:
                 permutation = torch.randperm(
                     len(indices),
                     generator=generator,
@@ -148,7 +148,7 @@ class EvaluationMemoryPlugin(SkillMemoryPlugin):
 
                 indices = [
                     indices[position]
-                    for position in permutation[: self.eval_memory_per_class]
+                    for position in permutation[: self.memory_per_class]
                 ]
 
             inputs: list[torch.Tensor] = []

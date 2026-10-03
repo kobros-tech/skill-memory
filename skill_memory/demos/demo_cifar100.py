@@ -1,17 +1,12 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
 
-"""CIFAR-100 Skill Memory experiment with CL evaluation.
+"""Sequential CIFAR-100 Skill Memory experiment.
 
-The public SkillMemoryStrategy owns the complete experiment lifecycle:
-
-* Skill Memory training
-* frozen per-class evaluation memory
-* anonymous CL evaluation through stored Skill Memory states
-* accuracy/loss tracking
-* forgetting metrics
-
-The demo only configures SplitMNIST and the strategy, then reports results.
+The demo deliberately exposes only experiment choices that have a clear
+continual-learning meaning. Every run starts at experience 0, and update_mode
+selects one complete training policy rather than combining independent
+switches that change both the algorithm and its compute budget.
 """
 
 from __future__ import annotations
@@ -28,115 +23,86 @@ from skill_memory import SkillMemoryStrategy
 from skill_memory.diagnostics import (
     evaluate_class_oracle,
     evaluate_skill_memory,
+    replay_provenance_report,
     timing_report,
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train and evaluate Skill Memory on CIFAR-100."
+        description="Run a sequential Skill Memory experiment on CIFAR-100."
     )
     parser.add_argument("--dataset-root", default="data")
     parser.add_argument("--download-only", action="store_true")
     parser.add_argument("--n-experiences", type=int, default=20)
     parser.add_argument(
-        "--experience-index",
+        "--max-experiences",
         type=int,
-        nargs="+",
-        default=[1],
-        help=(
-            "CIFAR-100 experience indices to run sequentially in one process. "
-            "For example: --experience-index 1 2 3."
-        ),
+        default=None,
+        help="Run the first N experiences only; always starts at experience 0.",
     )
     parser.add_argument(
-        "--eval-memory-per-class",
+        "--memory-per-class",
+        dest="memory_per_class",
         type=int,
         default=20,
-        help="Number of retained evaluation examples per class.",
+        help="Frozen examples retained per class for replay and evaluation.",
     )
     parser.add_argument(
-        "--skill-train-samples-per-class",
+        "--train-samples-per-class",
+        dest="train_samples_per_class",
         type=int,
         default=20,
-        help="Number of training samples per class used by Skill Memory.",
+        help="Current-experience training examples used per class.",
     )
-    parser.add_argument("--train-epochs", type=int, default=1)
+    parser.add_argument(
+        "--class-train-epochs",
+        dest="train_epochs",
+        type=int,
+        default=3,
+        help="Epochs for each explicit class-training pass.",
+    )
     parser.add_argument(
         "--class-train-mode",
         choices=("multiclass", "binary_one_vs_rest"),
         default="binary_one_vs_rest",
-        help=(
-            "Skill class-training objective: multiclass positive-only or "
-            "binary one-vs-rest YES/NO."
-        ),
+        help="Training objective used by each stored skill.",
     )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--eval-batch-size", type=int, default=64)
     parser.add_argument("--learning-rate", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-skills", type=int, default=20)
     parser.add_argument(
-        "--force-decision",
-        choices=("none", "reuse", "scratch"),
-        default="none",
-        help=(
-            "Force Skill Memory decisions for new classes. Use 'reuse' in the "
-            "candidate-routing experiment to create multi-class skills; "
-            "'none' keeps the normal decision policy."
-        ),
-    )
-    parser.add_argument(
-        "--eval-method",
-        choices=("cl",),
-        default="cl",
-        help="Compatibility flag; Skill Memory CL is the only production evaluator.",
-    )
-    parser.add_argument(
-        "--cl-update-mode",
-        choices=("replay", "small_replay", "new_class"),
+        "--update-mode",
+        dest="update_mode",
+        choices=("new_class", "replay", "refresh"),
         default="replay",
         help=(
-            "CL skill update data: full retained-history replay, bounded historical "
-            "replay for every existing skill, or newly exposed class only."
+            "One complete CL policy: new_class uses current data only; "
+            "replay uses retained history; refresh uses replay plus one "
+            "refresh pass for each existing skill."
         ),
     )
     parser.add_argument(
-        "--cl-replay-per-class",
+        "--replay-samples-per-class",
+        dest="replay_samples_per_class",
         type=int,
-        default=5,
+        default=None,
         help=(
-            "Examples per historical class during small_replay. Current "
-            "classes keep --skill-train-samples-per-class."
+            "Historical examples per old class used by replay/refresh. "
+            "Omit for all retained examples."
         ),
     )
-    parser.add_argument(
-        "--refresh-existing-skills",
-        action="store_true",
-        help="Retrain every existing skill on the enlarged domain each experience.",
-    )
-    parser.add_argument("--training-seed", type=int, default=0)
     parser.add_argument(
         "--skill-validation-fraction",
         type=float,
         default=0.2,
-        help=(
-            "Fraction held out from Skill Memory training for verification calibration."
-        ),
-    )
-    parser.add_argument(
-        "--skill-validation-seed",
-        type=int,
-        default=0,
-        help="Seed for the disjoint Skill Memory verification holdout.",
+        help="Fraction held out from current skill training for calibration.",
     )
     parser.add_argument(
         "--diagnose",
         action="store_true",
-        help=(
-            "Run optional Skill Memory diagnostics (class oracle and "
-            "anonymous probe). Diagnostics never affect production evaluation."
-        ),
+        help="Run optional non-production diagnostics.",
     )
     return parser.parse_args()
 
@@ -144,77 +110,51 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    if args.max_experiences is not None and args.max_experiences < 1:
+        raise ValueError("--max-experiences must be positive")
+    if args.max_experiences is not None and args.max_experiences > args.n_experiences:
+        raise ValueError(
+            "--max-experiences cannot exceed --n-experiences"
+        )
+
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # benchmark = SplitMNIST(
-    #     n_experiences=args.n_experiences,
-    #     seed=args.seed,
-    #     dataset_root=args.dataset_root,
-    # )
 
     print("Preparing CIFAR-100 dataset...")
     print(f"Dataset root: {args.dataset_root}")
-    print("If CIFAR-100 is not already downloaded, downloading it now...")
-
     benchmark = SplitCIFAR100(
         n_experiences=args.n_experiences,
         seed=args.seed,
         dataset_root=args.dataset_root,
     )
-
     print("CIFAR-100 dataset is ready.")
 
-    experience_indices = list(dict.fromkeys(args.experience_index))
-    if not experience_indices:
-        raise ValueError("At least one --experience-index is required.")
-    invalid = [
-        index
-        for index in experience_indices
-        if index < 0 or index >= len(benchmark.train_stream)
-    ]
-    if invalid:
-        raise ValueError(
-            f"--experience-index values must be between 0 and "
-            f"{len(benchmark.train_stream) - 1}: {invalid}"
-        )
+    num_experiences = args.max_experiences or len(benchmark.train_stream)
+    experience_indices = list(range(num_experiences))
 
     print(
         "Selected CIFAR-100 experiences: "
         + ", ".join(str(index) for index in experience_indices)
     )
-
     print("=== CIFAR-100 Skill Memory experiment ===")
     print("Training method: Skill Memory")
+    print(f"Update policy: {args.update_mode}")
     print(
-        f"CL update mode: {args.cl_update_mode}"
-        + (
-            f" (replay_per_class={args.cl_replay_per_class})"
-            if args.cl_update_mode == "small_replay"
-            else ""
-        )
+        "Replay samples per old class:",
+        "all retained" if args.replay_samples_per_class is None else args.replay_samples_per_class,
     )
     print(f"Skill class-training mode: {args.class_train_mode}")
     print("Evaluation: Skill Memory CL evaluator")
     print(f"Diagnostics: {'enabled' if args.diagnose else 'disabled'}")
     print(f"Device: {device}")
-    print(f"Experiences: {len(benchmark.train_stream)}")
-    print(
-        "Evaluation memory samples per class:",
-        args.eval_memory_per_class,
-    )
-    print(
-        "Skill training samples per class:",
-        args.skill_train_samples_per_class,
-    )
-    print(
-        "Skill Memory decision policy:",
-        args.force_decision,
-    )
+    print(f"Experiences: {len(experience_indices)}")
+    print(f"Memory per class: {args.memory_per_class}")
+    print(f"Train samples per class: {args.train_samples_per_class}")
+    print(f"Class-training epochs: {args.train_epochs}")
 
-    for index, experience in enumerate(benchmark.train_stream):
+    for index in experience_indices:
+        experience = benchmark.train_stream[index]
         print(
             f"  Exp {index}: "
             f"classes={sorted(experience.classes_in_this_experience)} "
@@ -225,36 +165,27 @@ def main() -> None:
         print(f"CIFAR-100 dataset prepared at {args.dataset_root}")
         return
 
-    # model = SimpleMLP(num_classes=10).to(device)
     model = SlimResNet18(nclasses=100).to(device)
-
-    force_decision = None if args.force_decision == "none" else args.force_decision
-
     strategy = SkillMemoryStrategy(
         model=model,
-        optimizer=torch.optim.SGD(
-            model.parameters(),
-            lr=args.learning_rate,
-        ),
+        optimizer=torch.optim.SGD(model.parameters(), lr=args.learning_rate),
         criterion=nn.CrossEntropyLoss(),
-        max_skills=args.max_skills,
+        max_skills=100,
         class_train_mode=args.class_train_mode,
-        skill_train_samples_per_class=args.skill_train_samples_per_class,
+        train_samples_per_class=args.train_samples_per_class,
         validation_fraction=args.skill_validation_fraction,
-        validation_seed=args.skill_validation_seed,
-        force_decision=force_decision,
+        validation_seed=args.seed,
         train_mb_size=args.batch_size,
-        train_epochs=args.train_epochs,
+        class_train_epochs=args.train_epochs,
         eval_mb_size=args.eval_batch_size,
-        eval_memory_per_class=args.eval_memory_per_class,
+        memory_per_class=args.memory_per_class,
         probe_seed=args.seed,
         device=device,
         diagnose=args.diagnose,
         verbose=True,
-        cl_update_mode=args.cl_update_mode,
-        refresh_existing_skills=args.refresh_existing_skills,
-        training_seed=args.training_seed,
-        cl_replay_per_class=args.cl_replay_per_class,
+        update_mode=args.update_mode,
+        replay_samples_per_class=args.replay_samples_per_class,
+        training_seed=args.seed,
     )
 
     accuracy_history: list[dict[int, float]] = []
@@ -266,27 +197,20 @@ def main() -> None:
         print(f"========== Training experience {experience_index} ==========")
         print(
             "Classes:",
-            sorted(int(class_id) for class_id in experience.classes_in_this_experience),
+            sorted(int(c) for c in experience.classes_in_this_experience),
         )
 
         strategy.train(experience)
-
-        # Evaluate only classes introduced so far. This is the same cumulative
-        # test population for both evaluator choices and prevents an early
-        # CL evaluator from being penalized for classes that have no skill yet.
-        # eval_stream = [
-        #     benchmark.test_stream[index] for index in range(experience_index + 1)
-        # ]
 
         eval_stream = [
             benchmark.test_stream[index] for index in experience_indices[: step + 1]
         ]
 
-        class_map = strategy.skill_memory_plugin.class_map
-        memory = strategy.skill_memory_plugin.memory
         print("Skill Memory groups after training:")
-        for skill in sorted(memory.slots()):
-            classes = sorted(class_map.classes_for_skill(skill))
+        for skill in sorted(strategy.skill_memory_plugin.memory.slots()):
+            classes = sorted(
+                strategy.skill_memory_plugin.class_map.classes_for_skill(skill)
+            )
             print(f"  skill {skill}: classes={classes}")
 
         print(f"========== Evaluation after experience {experience_index} ==========")
@@ -299,7 +223,7 @@ def main() -> None:
 
         forgetting_values = []
         for class_id, introduction_step in class_to_step.items():
-            if introduction_step > step or class_id not in current_accuracy:
+            if class_id not in current_accuracy:
                 continue
             observed = [
                 history[class_id]
@@ -348,15 +272,25 @@ def main() -> None:
                 "direct_probe_mean_accuracy=",
                 f"{np.mean([item['accuracy'] for item in direct_probe.values()]):.4f}",
             )
-
             for bucket, stats in timing_report(strategy).items():
                 print(
                     f"timing[{bucket}]: total={stats['total_seconds']:.2f}s "
                     f"calls={stats['calls']} mean={stats['mean_seconds']:.3f}s"
                 )
 
-    results = strategy.results()
+    if args.diagnose:
+        audit = replay_provenance_report(strategy, diagnose=True)
+        print("replay provenance:")
+        for kind in ("class_training", "refresh"):
+            row = audit[kind]
+            print(
+                f"  {kind}: calls={row['calls']} "
+                f"optimizer_steps={row['optimizer_steps']} "
+                f"historical_examples={row['historical_examples']}"
+            )
+        print(f"  violations: {audit['violations'] or 'none'}")
 
+    results = strategy.results()
     final_accuracy = dict(results["final_class_accuracy"])
     final_forgetting_values = []
     for class_id, introduction_step in class_to_step.items():
@@ -375,20 +309,14 @@ def main() -> None:
 
     print()
     print("=== Summary ===")
+    print("update_policy=", args.update_mode)
     print("mean_forgetting=", f"{mean_forgetting:.4f}")
-    print(
-        "mean_final_accuracy=",
-        f"{results['mean_final_accuracy']:.4f}",
-    )
-    print(
-        "mean_final_loss=",
-        f"{results['mean_final_loss']:.4f}",
-    )
-
+    print("mean_final_accuracy=", f"{results['mean_final_accuracy']:.4f}")
+    print("raw_mean_final_accuracy=", f"{results['raw_mean_final_accuracy']:.4f}")
+    print("mean_final_loss=", f"{results['mean_final_loss']:.4f}")
     print("final_class_accuracy:")
     for class_id, accuracy in final_accuracy.items():
         print(f"  class {class_id}: {accuracy:.4f}")
-
     print("final_class_loss:")
     for class_id, loss in results["final_class_loss"].items():
         print(f"  class {class_id}: {loss:.4f}")

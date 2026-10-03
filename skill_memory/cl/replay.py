@@ -8,17 +8,17 @@ Skill Memory can train a class on four conceptually different data sources:
 1. **current**  -- the samples of the experience being trained;
 2. **retained** -- the bounded per-class memory kept by
    :class:`~skill_memory.evaluation.memory.EvaluationMemoryPlugin`
-   (at most ``eval_memory_per_class`` frozen examples per class);
+   (at most ``memory_per_class`` frozen examples per class);
 3. **offline pool** -- an optional, explicitly opted-in *oracle* negative pool
    used only for offline ablations (never a continual-learning setting);
 4. **refresh** -- retraining of *existing* skills on the enlarged domain
    (a separate, independent switch, see :class:`RefreshPolicy` below).
 
-The ``cl_update_mode`` flag controls **only** how much of source 2 (and, when
+The ``update_mode`` flag controls **only** how much of source 2 (and, when
 opted in, source 3) is consumed.  With :math:`\mathcal R_t` the retained
 memory of all classes seen strictly before experience :math:`t`,
 :math:`R_c \subseteq \mathcal R_t` the retained examples of class :math:`c`,
-and :math:`K` = ``cl_replay_per_class``:
+and :math:`K` = ``replay_samples_per_class``:
 
 .. math::
 
@@ -43,11 +43,11 @@ from dataclasses import dataclass
 import torch
 
 NEW_CLASS = "new_class"
-SMALL_REPLAY = "small_replay"
 REPLAY = "replay"
+REFRESH = "refresh"
 
-#: Valid values for ``cl_update_mode`` (ordered from least to most history).
-REPLAY_MODES = (NEW_CLASS, SMALL_REPLAY, REPLAY)
+#: Valid complete update policies exposed by the public API.
+REPLAY_MODES = (NEW_CLASS, REPLAY, REFRESH)
 
 
 def select_historical_samples(
@@ -93,16 +93,20 @@ class ReplayPolicy:
     """
 
     mode: str = REPLAY
-    per_class: int = 5
+    per_class: int | None = None
 
     def __post_init__(self) -> None:
         if self.mode not in REPLAY_MODES:
             raise ValueError(
-                f"cl_update_mode must be one of {REPLAY_MODES}, got {self.mode!r}"
+                f"update_mode must be one of {REPLAY_MODES}, got {self.mode!r}"
             )
-        if int(self.per_class) < 1:
-            raise ValueError("cl_replay_per_class must be positive")
-        object.__setattr__(self, "per_class", int(self.per_class))
+        if self.per_class is not None and int(self.per_class) < 1:
+            raise ValueError("replay_samples_per_class must be positive or None")
+        object.__setattr__(
+            self,
+            "per_class",
+            None if self.per_class is None else int(self.per_class),
+        )
 
     # -- semantics -----------------------------------------------------
 
@@ -114,7 +118,7 @@ class ReplayPolicy:
     @property
     def historical_limit(self) -> int | None:
         """Per-class cap on historical examples (``None`` = no cap)."""
-        return self.per_class if self.mode == SMALL_REPLAY else None
+        return self.per_class if self.mode in (REPLAY, REFRESH) else None
 
     def retained_for_training(self, retained_memory):
         """Return the retained memory this policy allows into training.
@@ -134,50 +138,30 @@ class ReplayPolicy:
     def describe(self) -> str:
         """Short human-readable description used in logs."""
         if self.mode == NEW_CLASS:
-            return "new_class (historical replay = 0)"
-        if self.mode == SMALL_REPLAY:
-            return f"small_replay (<= {self.per_class} retained examples/class)"
-        return "replay (all retained examples/class)"
-
-
-@dataclass(frozen=True)
-class RefreshPolicy:
-    r"""Whether *existing* skills are retrained on the enlarged class domain.
-
-    This is deliberately **independent** of :class:`ReplayPolicy`.  When
-    enabled, after each logical experience every pre-existing skill :math:`s`
-    owning classes :math:`O_s` is retrained once on the observed domain
-    :math:`D_t`; the cost is :math:`\mathcal O(\#\text{skills})` extra
-    training passes *per experience* (see ``docs/MATHEMATICS.md``).
-
-    A refresh needs positive examples of every owned class, which only exist
-    when history is available, so ``refresh`` requires a replay mode other
-    than ``new_class`` (validated by :func:`validate_policies`).
-    """
-
-    enabled: bool = False
+            return "new_class (historical replay = 0; existing skills frozen)"
+        history = (
+            "all retained examples/class"
+            if self.per_class is None
+            else f"<= {self.per_class} retained examples/class"
+        )
+        if self.mode == REFRESH:
+            return f"refresh ({history}; existing skills refreshed)"
+        return f"replay ({history}; existing skills frozen)"
 
 
 def validate_policies(
     replay: ReplayPolicy,
-    refresh: RefreshPolicy,
     *,
     class_train_mode: str,
     has_offline_pool: bool,
     allow_offline_negative_pool: bool,
 ) -> None:
     """Reject inconsistent combinations at construction time."""
-    if refresh.enabled:
-        if class_train_mode != "binary_one_vs_rest":
-            raise ValueError(
-                "refresh_existing_skills=True requires "
-                "class_train_mode='binary_one_vs_rest'"
-            )
-        if not replay.uses_history:
-            raise ValueError(
-                "refresh_existing_skills=True needs historical data; "
-                "it cannot be combined with cl_update_mode='new_class'"
-            )
+    if replay.mode == REFRESH and class_train_mode != "binary_one_vs_rest":
+        raise ValueError(
+            "update_mode='refresh' requires "
+            "class_train_mode='binary_one_vs_rest'"
+        )
     if has_offline_pool:
         if not allow_offline_negative_pool:
             raise ValueError(
@@ -187,7 +171,7 @@ def validate_policies(
             )
         if not replay.uses_history:
             raise ValueError(
-                "binary_negative_pool contradicts cl_update_mode='new_class' "
+                "binary_negative_pool contradicts update_mode='new_class' "
                 "(historical replay must be 0); choose 'small_replay' or 'replay'"
             )
         if class_train_mode != "binary_one_vs_rest":

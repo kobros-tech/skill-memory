@@ -62,7 +62,7 @@ package — for exactly this reason (see the comment at the top of
   training path; `tests/test_reproducibility.py` will fail.
 - The `validation_fraction` hold-out is stored under
   `CALIBRATION_EXAMPLES_KEY` and is **calibration data only**.
-- `refresh_existing_skills` is orthogonal to `cl_update_mode`; keep their
+- `update_mode` is the complete update policy; do not combine separate
   timing buckets and provenance kinds (`"class"` vs `"refresh"`) separate.
 
 ## Bookkeeping invariants (`cl/skill_registry.py`)

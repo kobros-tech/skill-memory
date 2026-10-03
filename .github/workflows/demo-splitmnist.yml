@@ -18,13 +18,13 @@ jobs:
       matrix:
         include:
           - mode: new_class
-            refresh: ""
-          - mode: small_replay
-            refresh: ""
+            replay: ""
           - mode: replay
-            refresh: ""
-          - mode: small_replay
-            refresh: "--refresh-existing-skills"
+            replay: "--replay-samples-per-class 5"
+          - mode: replay
+            replay: ""
+          - mode: refresh
+            replay: "--replay-samples-per-class 5"
 
     steps:
       - uses: actions/checkout@v4
@@ -43,15 +43,18 @@ jobs:
           path: data
           key: splitmnist-dataset-v1-${{ runner.os }}
 
-      - name: Run 5 experiences (${{ matrix.mode }} ${{ matrix.refresh }})
+      - name: Run 5 experiences (${{ matrix.mode }} ${{ matrix.replay }})
         run: |
           python -m skill_memory.demos.demo_splitmnist \
             --dataset-root data \
             --n-experiences 5 \
-            --cl-update-mode ${{ matrix.mode }} \
-            ${{ matrix.refresh }} \
+            --memory-per-class 20 \
+            --train-samples-per-class 20 \
+            --class-train-epochs 1 \
+            --update-mode ${{ matrix.mode }} \
+            ${{ matrix.replay }} \
             --diagnose \
-            | tee splitmnist_${{ matrix.mode }}${{ matrix.refresh && '_refresh' || '' }}.txt
+            | tee splitmnist_${{ matrix.mode }}${{ matrix.replay && '_capped' || '_full' }}.txt
           # The replay audit must report no violations.
           grep -q "violations: none" splitmnist_*.txt
 
@@ -59,7 +62,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: splitmnist-${{ matrix.mode }}${{ matrix.refresh && '-refresh' || '' }}-${{ github.run_id }}
+          name: splitmnist-${{ matrix.mode }}${{ matrix.replay && '-capped' || '-full' }}-${{ github.run_id }}
           path: splitmnist_*.txt
           if-no-files-found: warn
           retention-days: 14

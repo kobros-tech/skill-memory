@@ -28,9 +28,9 @@ Nothing here is aspirational: if the code and this file disagree, that is a bug.
 | $z^{(s)}_c(x)$ | raw logit of class $c$ (output column $c$) of skill $s$ at input $x$ |
 | $\operatorname{own}(s)\subseteq\mathcal D_t$ | classes owned by skill $s$ (see §1) |
 | $s(c)$ | the unique skill owning class $c$ |
-| $R_c$ | retained memory of class $c$: at most $m$ frozen examples (`eval_memory_per_class`) |
-| $K$ | `cl_replay_per_class` |
-| $n$ | `skill_train_samples_per_class` (per-class cap on *current* data) |
+| $R_c$ | retained memory of class $c$: at most $m$ frozen examples (`memory_per_class`) |
+| $K$ | `replay_samples_per_class` |
+| $n$ | `train_samples_per_class` (per-class cap on *current* data) |
 | $f$ | `validation_fraction` |
 | $\sigma(u)=1/(1+e^{-u})$ | logistic function |
 | $\mathbb 1[\cdot]$ | indicator |
@@ -238,7 +238,7 @@ violation.
 ## 5. Refreshing existing skills
 
 *Implemented in `SkillMemoryPlugin._refresh_existing_skills` and
-`train_skill_on_domain`. Switch: `refresh_existing_skills` (default off),
+`train_skill_on_domain`. Switch: `update_mode="refresh"`,
 **independent of the replay mode**.*
 
 After experience $t$, each pre-existing skill $s$ (created before $t$, owning
@@ -286,7 +286,7 @@ N^{\rm cls}_t=N^{\rm cur}_t+\sum_{c\in\mathcal D_{t-1}}|H_c|,\qquad
 $$
 
 With `replay` $\sum_c|H_c|\approx m\,|\mathcal D_{t-1}|$ grows linearly with
-the number of observed classes; with `small_replay` it grows as
+the number of observed classes; with `replay` with a finite `replay_samples_per_class` cap it grows as
 $K\,|\mathcal D_{t-1}|$; with `new_class` it is $0$.
 
 **Refresh**, once per pre-existing skill $S_{t-1}$:
@@ -385,8 +385,8 @@ Four **independent factors** act on a run:
 | Factor | Switch | Differs between rows of |
 |---|---|---|
 | objective | `class_train_mode` | multiclass vs. one-vs-rest |
-| replay quantity | `cl_update_mode` ($H_c$, §4) | `new_class` / `small_replay` / `replay` |
-| refresh | `refresh_existing_skills` (§5) | off / on |
+| replay quantity | `update_mode` ($H_c$, §4) | `new_class` / `replay` with a finite `replay_samples_per_class` cap / `replay` |
+| refresh | `update_mode` (§5) | `new_class` / `replay` / `refresh` |
 | evaluation | raw vs. calibrated (§7) | reported side by side |
 
 A fair comparison changes **one** factor and holds the others, the data, the

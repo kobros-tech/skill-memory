@@ -145,8 +145,8 @@ def test_cl_update_modes_are_covered_end_to_end():
     """The old fake-object test was replaced by real runs.
 
     See ``test_replay_isolation.py``: provenance of every training call is
-    audited for each of ``new_class`` / ``small_replay`` / ``replay``.
+    audited for each of ``new_class`` / ``replay`` / ``refresh``.
     """
     from skill_memory.cl.replay import REPLAY_MODES
 
-    assert set(REPLAY_MODES) == {"new_class", "small_replay", "replay"}
+    assert set(REPLAY_MODES) == {"new_class", "replay", "refresh"}

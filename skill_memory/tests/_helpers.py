@@ -49,9 +49,9 @@ def make_strategy(n_classes=6, *, model_seed=0, **kwargs) -> SkillMemoryStrategy
     options = {
         "class_train_mode": "binary_one_vs_rest",
         "max_skills": 10,
-        "eval_memory_per_class": 10,
+        "memory_per_class": 10,
         "train_mb_size": 16,
-        "train_epochs": 1,
+        "class_train_epochs": 1,
         "eval_mb_size": 16,
         "probe_seed": 0,
         "verbose": False,

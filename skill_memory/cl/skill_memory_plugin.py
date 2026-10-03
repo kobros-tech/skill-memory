@@ -40,11 +40,7 @@ from ..utils.probing import (
 )
 from ..utils.protocol_guard import assert_training_experience
 from .decision import DEFAULT_MAX_SAFETY_CANDIDATES, DecisionProbeCache, decide_class
-from .replay import (
-    RefreshPolicy,
-    ReplayPolicy,
-    validate_policies,
-)
+from .replay import ReplayPolicy, validate_policies
 from .skill_registry import (
     CALIBRATION_EXAMPLES_KEY,
     ClassRecord,
@@ -98,9 +94,8 @@ class SkillMemoryPlugin(SupervisedPlugin):
         strict_protocol: bool = True,
         binary_negative_pool=None,
         allow_offline_negative_pool: bool = False,
-        cl_update_mode: str = "replay",
-        cl_replay_per_class: int = 5,
-        refresh_existing_skills: bool = False,
+        update_mode: str = "replay",
+        replay_samples_per_class: int | None = None,
         training_seed: int = 0,
         batch_stage1: bool = False,
         stage1_chunk_size: int | None = None,
@@ -124,17 +119,12 @@ class SkillMemoryPlugin(SupervisedPlugin):
 
         Historical-data semantics (see :mod:`skill_memory.cl.replay`)
         --------------------------------------------------------------
-        ``cl_update_mode`` controls *only* how much retained history enters
-        the training of a class: ``new_class`` (none), ``small_replay`` (at
-        most ``cl_replay_per_class`` retained examples per old class) or
-        ``replay`` (all *currently retained* examples -- the retained memory
-        is itself bounded by ``eval_memory_per_class``).
-
-        ``refresh_existing_skills`` is a separate switch: when ``True``, every
-        pre-existing skill is additionally retrained once per experience on
-        the enlarged class domain (binary mode only; needs history, so it is
-        incompatible with ``new_class``).  It costs one extra training pass
-        per skill per experience.
+        ``update_mode`` selects the complete training policy:
+        ``new_class`` uses no retained history; ``replay`` uses retained
+        history for incoming classes; ``refresh`` does the same replay update
+        and additionally refreshes pre-existing skills on the enlarged domain.
+        ``replay_samples_per_class=None`` means all retained examples, while
+        an integer applies a deterministic per-class replay cap.
 
         ``binary_negative_pool`` is an offline *oracle* data source, not a
         continual-learning mode; it is rejected unless
@@ -186,18 +176,16 @@ class SkillMemoryPlugin(SupervisedPlugin):
         self.strict_protocol = bool(strict_protocol)
         self.binary_negative_pool = binary_negative_pool
         self.allow_offline_negative_pool = bool(allow_offline_negative_pool)
-        self.replay_policy = ReplayPolicy(cl_update_mode, cl_replay_per_class)
-        self.refresh_policy = RefreshPolicy(bool(refresh_existing_skills))
+        self.replay_policy = ReplayPolicy(update_mode, replay_samples_per_class)
         validate_policies(
             self.replay_policy,
-            self.refresh_policy,
             class_train_mode=self.class_train_mode,
             has_offline_pool=bool(binary_negative_pool),
             allow_offline_negative_pool=self.allow_offline_negative_pool,
         )
         # Public, read-only views kept for backwards compatibility.
-        self.cl_update_mode = self.replay_policy.mode
-        self.cl_replay_per_class = self.replay_policy.per_class
+        self.update_mode = self.replay_policy.mode
+        self.replay_samples_per_class = self.replay_policy.per_class
         self.training_seed = int(training_seed)
         #: One ``TrainingProvenance.as_dict()`` (+ context) per training call.
         self.training_log: list[dict[str, Any]] = []
@@ -370,8 +358,7 @@ class SkillMemoryPlugin(SupervisedPlugin):
         policy = self.replay_policy
         historical_memory = policy.retained_for_training(self.retained_memory)
         self._log(
-            f"Class-training replay policy: {policy.describe()}; "
-            f"refresh_existing_skills={self.refresh_policy.enabled}"
+            f"Class-training update policy: {policy.describe()}"
         )
 
         for target_class in classes:
@@ -544,8 +531,8 @@ class SkillMemoryPlugin(SupervisedPlugin):
         entry = result.provenance.as_dict()
         entry.update(
             experience_index=experience_index,
-            cl_update_mode=self.replay_policy.mode,
-            cl_replay_per_class=self.replay_policy.per_class,
+            update_mode=self.replay_policy.mode,
+            replay_samples_per_class=self.replay_policy.per_class,
         )
         self.training_log.append(entry)
 
@@ -583,19 +570,19 @@ class SkillMemoryPlugin(SupervisedPlugin):
     def _refresh_existing_skills(self, strategy, experience, experience_index) -> None:
         r"""Retrain pre-existing binary skills on the enlarged class domain.
 
-        Runs only when ``refresh_existing_skills=True`` (independent of the
-        replay mode).  With :math:`S` pre-existing skills the cost is
+        Runs only when ``update_mode="refresh"``. With :math:`S`
+        pre-existing skills the cost is
         :math:`S` extra training passes for this experience; skills created
         in this very experience were already trained on the observed domain
         and are skipped.  Historical data enters under the replay policy.
         """
-        if not self.refresh_policy.enabled:
+        policy = self.replay_policy
+        if policy.mode != "refresh":
             return
         if not self.reuse_is_mutable:
             self._log("Skill refresh skipped: reuse_is_mutable=False")
             return
 
-        policy = self.replay_policy
         retained_memory = policy.retained_for_training(self.retained_memory)
         current_classes = set(classes_in_experience(experience))
         observed_classes = set(current_classes)

@@ -43,8 +43,8 @@ def replay_provenance_report(strategy, *, diagnose: bool) -> dict[str, Any]:
     -------
     dict with keys
 
-    ``mode`` / ``replay_per_class`` / ``refresh_existing_skills``
-        The configuration in force.
+    ``mode`` / ``replay_samples_per_class``
+        The complete update policy configuration in force.
     ``calls``
         The raw per-call provenance records.
     ``class_training`` / ``refresh``
@@ -92,8 +92,8 @@ def replay_provenance_report(strategy, *, diagnose: bool) -> dict[str, Any]:
 
     return {
         "mode": policy.mode,
-        "replay_per_class": policy.per_class,
-        "refresh_existing_skills": plugin.refresh_policy.enabled,
+        "replay_samples_per_class": policy.per_class,
+        "refresh_enabled": policy.mode == "refresh",
         "calls": log,
         "class_training": aggregate("class"),
         "refresh": aggregate("refresh"),

@@ -89,7 +89,7 @@ class TrainingProvenance:
 
     ``current`` / ``retained`` / ``offline_pool`` map ``class_id -> count``.
     ``historical_total`` (= retained + offline pool) is ``0`` under
-    ``cl_update_mode='new_class'`` -- the invariant asserted by the tests.
+    ``update_mode='new_class'`` -- the invariant asserted by the tests.
     """
 
     kind: str  # "class" or "refresh"
@@ -358,7 +358,7 @@ def train_on_class(
       samples are positives, all others negatives.
     * **retained** -- ``retained_memory``: previously seen classes, each
       capped at ``historical_samples_per_class`` (``None`` = all retained).
-      The caller passes ``None`` for ``cl_update_mode='new_class'``.
+      The caller passes ``None`` for ``update_mode='new_class'``.
     * **offline pool** -- ``negative_pool``: explicit *oracle* negatives for
       offline ablations; capped by the same ``historical_samples_per_class``.
 

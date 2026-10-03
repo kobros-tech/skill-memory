@@ -1,27 +1,21 @@
 # Copyright (c) 2026 Kobros-Tech Ltd
 # SPDX-License-Identifier: MIT
 
-r"""Replay-quantity ablation on synthetic data (no download, runs in seconds).
+r"""Controlled replay-policy ablation on synthetic data.
 
-Compares, under *identical* data, model initialisation and seeds::
+All configurations use identical data, initial weights and seeds. The only
+algorithmic dimensions are the complete update policy and the retained-history
+budget:
 
-    new_class             historical replay = 0
-    small_replay          <= K retained examples / old class
-    replay                all currently retained examples / old class
-    <mode> + refresh      the same, plus retraining of existing skills
+    new_class          no retained history
+    replay (K)         retained history capped at K/class
+    replay (all)       all retained history
+    refresh (K)        replay K/class + existing-skill refresh
+    refresh (all)      replay all retained history + existing-skill refresh
 
-Because ``cl_update_mode`` and ``refresh_existing_skills`` are independent
-switches, every row differs from its neighbour in exactly **one** factor, so
-an accuracy or time difference can be attributed to that factor.  Besides
-accuracy, each row reports *how much* history was consumed and how many
-optimiser steps were spent, taken from the replay provenance audit
-(:func:`skill_memory.diagnostics.replay_provenance_report`); the ``viol``
-column must always be ``0``.
-
-Run::
-
-    python -m skill_memory.demos.demo_replay_ablation
-    python -m skill_memory.demos.demo_replay_ablation --seeds 0 1 2 --json out.json
+Refresh is a first-class update policy, not a second flag that can accidentally
+be combined with another experiment. The report includes optimizer work so
+accuracy is never interpreted without its processing cost.
 """
 
 from __future__ import annotations
@@ -42,20 +36,17 @@ from skill_memory.diagnostics import replay_provenance_report
 
 N_FEATURES = 8
 
-#: (label, cl_update_mode, refresh_existing_skills)
 CONFIGURATIONS = (
-    ("new_class", "new_class", False),
-    ("small_replay", "small_replay", False),
-    ("replay", "replay", False),
-    ("small_replay+refresh", "small_replay", True),
-    ("replay+refresh", "replay", True),
+    ("new_class", "new_class", None),
+    ("replay(K)", "replay", "K"),
+    ("replay(all)", "replay", None),
+    ("refresh(K)", "refresh", "K"),
+    ("refresh(all)", "refresh", None),
 )
 
 
 @dataclass
 class Row:
-    """One configuration, averaged over seeds."""
-
     name: str
     calibrated_accuracy: float
     raw_accuracy: float
@@ -68,8 +59,7 @@ class Row:
 
 
 def make_benchmark(n_classes: int, n_experiences: int, n_per_class: int, seed: int):
-    """Gaussian blobs: class ``c`` is shifted along feature ``c % N_FEATURES``."""
-
+    """Create deterministic Gaussian class blobs."""
     def split(offset: int):
         generator = torch.Generator().manual_seed(seed * 100 + offset)
         xs, ys = [], []
@@ -96,7 +86,7 @@ def make_benchmark(n_classes: int, n_experiences: int, n_per_class: int, seed: i
 
 def run_configuration(
     mode: str,
-    refresh: bool,
+    replay_budget: str | None,
     *,
     seed: int,
     n_classes: int,
@@ -105,24 +95,26 @@ def run_configuration(
     replay_per_class: int,
     memory_per_class: int,
 ) -> dict:
-    """Train + evaluate one configuration; return a flat metrics dict."""
     benchmark = make_benchmark(n_classes, n_experiences, n_per_class, seed)
-    torch.manual_seed(seed)  # identical initial weights for every configuration
+    torch.manual_seed(seed)
     model = SimpleMLP(input_size=N_FEATURES, hidden_size=16, num_classes=n_classes)
+
+    replay_samples = (
+        replay_per_class if replay_budget == "K" else None
+    )
     strategy = SkillMemoryStrategy(
         model=model,
         optimizer=torch.optim.SGD(model.parameters(), lr=0.05),
         criterion=torch.nn.CrossEntropyLoss(),
         class_train_mode="binary_one_vs_rest",
-        cl_update_mode=mode,
-        cl_replay_per_class=replay_per_class,
-        refresh_existing_skills=refresh,
-        eval_memory_per_class=memory_per_class,
-        skill_train_samples_per_class=memory_per_class,
+        update_mode=mode,
+        replay_samples_per_class=replay_samples,
+        memory_per_class=memory_per_class,
+        train_samples_per_class=memory_per_class,
         max_skills=n_classes,
         train_mb_size=16,
         eval_mb_size=64,
-        train_epochs=2,
+        class_train_epochs=2,
         probe_seed=seed,
         training_seed=seed,
         verbose=False,
@@ -142,7 +134,8 @@ def run_configuration(
 
     final = history[-1]
     drops = [
-        max(h[c] for h in history[introduced[c] :] if c in h) - final[c] for c in final
+        max(h[c] for h in history[introduced[c]:] if c in h) - final[c]
+        for c in final
     ]
     audit = replay_provenance_report(strategy, diagnose=True)
     return {
@@ -159,11 +152,16 @@ def run_configuration(
 
 
 def run_ablation(seeds, **settings) -> list[Row]:
-    """Run every configuration for every seed and average the metrics."""
     rows = []
-    for name, mode, refresh in CONFIGURATIONS:
+    for name, mode, replay_budget in CONFIGURATIONS:
         runs = [
-            run_configuration(mode, refresh, seed=seed, **settings) for seed in seeds
+            run_configuration(
+                mode,
+                replay_budget,
+                seed=seed,
+                **settings,
+            )
+            for seed in seeds
         ]
         mean = {k: float(np.mean([r[k] for r in runs])) for k in runs[0]}
         mean["violations"] = int(sum(r["violations"] for r in runs))
@@ -173,16 +171,17 @@ def run_ablation(seeds, **settings) -> list[Row]:
 
 def format_table(rows: list[Row]) -> str:
     header = (
-        f"{'configuration':<22}{'acc(cal)':>9}{'acc(raw)':>9}{'forget':>8}"
+        f"{'configuration':<16}{'acc(cal)':>9}{'acc(raw)':>9}{'forget':>8}"
         f"{'hist':>8}{'cls-steps':>10}{'ref-steps':>10}{'sec':>7}{'viol':>6}"
     )
     lines = [header, "-" * len(header)]
-    for r in rows:
+    for row in rows:
         lines.append(
-            f"{r.name:<22}{r.calibrated_accuracy:>9.3f}{r.raw_accuracy:>9.3f}"
-            f"{r.forgetting:>8.3f}{r.historical_examples:>8.0f}"
-            f"{r.class_steps:>10.0f}{r.refresh_steps:>10.0f}"
-            f"{r.seconds:>7.2f}{r.violations:>6d}"
+            f"{row.name:<16}{row.calibrated_accuracy:>9.3f}"
+            f"{row.raw_accuracy:>9.3f}{row.forgetting:>8.3f}"
+            f"{row.historical_examples:>8.0f}{row.class_steps:>10.0f}"
+            f"{row.refresh_steps:>10.0f}{row.seconds:>7.2f}"
+            f"{row.violations:>6d}"
         )
     return "\n".join(lines)
 
@@ -193,7 +192,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-classes", type=int, default=8)
     parser.add_argument("--n-experiences", type=int, default=4)
     parser.add_argument("--n-per-class", type=int, default=60)
-    parser.add_argument("--replay-per-class", type=int, default=3, help="K")
+    parser.add_argument("--replay-per-class", type=int, default=3)
     parser.add_argument("--memory-per-class", type=int, default=12)
     parser.add_argument("--json", help="also write the rows to this JSON file")
     return parser.parse_args()
@@ -216,12 +215,12 @@ def main() -> None:
     )
     print(format_table(rows))
     print(
-        "\nhist = historical examples consumed; cls-steps / ref-steps = optimiser "
-        "steps spent on class training / on refreshing existing skills."
+        "\nhist = historical examples consumed; cls-steps / ref-steps = "
+        "optimizer steps spent on class training / existing-skill refresh."
     )
     if args.json:
         with open(args.json, "w") as handle:
-            json.dump([asdict(r) for r in rows], handle, indent=2)
+            json.dump([asdict(row) for row in rows], handle, indent=2)
 
 
 if __name__ == "__main__":
