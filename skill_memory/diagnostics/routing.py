@@ -13,10 +13,44 @@ here therefore requires ``diagnose=True`` (see
 
 from __future__ import annotations
 
-import torch
+from dataclasses import dataclass
 
-from ..evaluation.routing import RoutingResult, _normalize_routing_scores
+import torch
+from torch import Tensor
+
 from ._gate import require_diagnose
+
+
+@dataclass(frozen=True)
+class RoutingResult:
+    """Input-only skill-routing result for one minibatch."""
+
+    skill_indices: Tensor
+    probabilities: Tensor
+    best_probability: Tensor
+    second_probability: Tensor
+    confidence_gap: Tensor
+
+
+def _normalize_routing_scores(scores: Tensor, temperature: float) -> Tensor:
+    r"""Normalise per-skill scores across candidate skills (columns sum to 1).
+
+    :math:`p_{s,i}\propto \max(0, r_{s,i})^{1/T}` for skill :math:`s` and sample
+    :math:`i`; a sample whose scores are all zero gets the uniform distribution.
+    """
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+
+    powered = scores.clamp_min(0).pow(1.0 / temperature)
+    totals = powered.sum(dim=0, keepdim=True)
+    eps = torch.finfo(powered.dtype).eps
+    probabilities = powered / totals.clamp_min(eps)
+
+    zero_total = totals.squeeze(0) <= 0
+    if zero_total.any():
+        probabilities = probabilities.clone()
+        probabilities[:, zero_total] = 1.0 / probabilities.shape[0]
+    return probabilities
 
 
 def _skill_own_score(logits: torch.Tensor, owned_classes) -> torch.Tensor:
@@ -124,7 +158,7 @@ def route_probe_logits(
     See :func:`find_best_routing_skill` (including the required
     ``diagnose=True``). Kept for callers that only need the routing
     decision, not the full
-    :class:`~skill_memory.evaluation.routing.RoutingResult`.
+    :class:`RoutingResult`.
     """
     return find_best_routing_skill(
         logits_by_skill,

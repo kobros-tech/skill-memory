@@ -1,0 +1,1165 @@
+{
+ "new_class": {
+  "decisions": {
+   "0": {
+    "0": [
+     "scratch",
+     0
+    ],
+    "1": [
+     "scratch",
+     1
+    ]
+   },
+   "1": {
+    "2": [
+     "scratch",
+     2
+    ],
+    "3": [
+     "scratch",
+     3
+    ]
+   },
+   "2": {
+    "4": [
+     "scratch",
+     4
+    ],
+    "5": [
+     "scratch",
+     5
+    ]
+   }
+  },
+  "final_class_accuracy": {
+   "0": 0.775,
+   "1": 0.0,
+   "2": 0.05,
+   "3": 0.0,
+   "4": 0.25,
+   "5": 0.0
+  },
+  "mean_final_accuracy": 0.1791666666666667,
+  "mean_final_loss": 4.882627524932225,
+  "provenance": [
+   {
+    "current": {
+     "0": 10,
+     "1": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 0,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     0
+    ]
+   },
+   {
+    "current": {
+     "0": 10,
+     "1": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 0,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     1
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 1,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     2
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 1,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     3
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 2,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     4
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 2,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     5
+    ]
+   }
+  ],
+  "raw_mean_final_accuracy": 0.475,
+  "skills": {
+   "0": [
+    0
+   ],
+   "1": [
+    1
+   ],
+   "2": [
+    2
+   ],
+   "3": [
+    3
+   ],
+   "4": [
+    4
+   ],
+   "5": [
+    5
+   ]
+  },
+  "state_checksum": {
+   "0": 21.76756029482931,
+   "1": 21.858070042915642,
+   "2": 21.95635622763075,
+   "3": 21.840077561326325,
+   "4": 22.064677760004997,
+   "5": 21.931738063693047
+  }
+ },
+ "refresh": {
+  "decisions": {
+   "0": {
+    "0": [
+     "scratch",
+     0
+    ],
+    "1": [
+     "scratch",
+     1
+    ]
+   },
+   "1": {
+    "2": [
+     "scratch",
+     2
+    ],
+    "3": [
+     "scratch",
+     3
+    ]
+   },
+   "2": {
+    "4": [
+     "scratch",
+     4
+    ],
+    "5": [
+     "scratch",
+     5
+    ]
+   }
+  },
+  "final_class_accuracy": {
+   "0": 0.0,
+   "1": 0.0,
+   "2": 0.05,
+   "3": 0.0,
+   "4": 1.0,
+   "5": 1.0
+  },
+  "mean_final_accuracy": 0.3416666666666666,
+  "mean_final_loss": 3.1977768584620208,
+  "provenance": [
+   {
+    "current": {
+     "0": 10,
+     "1": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 0,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     0
+    ]
+   },
+   {
+    "current": {
+     "0": 10,
+     "1": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 0,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     1
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 40,
+    "experience_index": 1,
+    "historical_total": 20,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10
+    },
+    "target_classes": [
+     2
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 40,
+    "experience_index": 1,
+    "historical_total": 20,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10
+    },
+    "target_classes": [
+     3
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 40,
+    "experience_index": 1,
+    "historical_total": 20,
+    "kind": "refresh",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10
+    },
+    "target_classes": [
+     0
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 40,
+    "experience_index": 1,
+    "historical_total": 20,
+    "kind": "refresh",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10
+    },
+    "target_classes": [
+     1
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 60,
+    "experience_index": 2,
+    "historical_total": 40,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10,
+     "2": 10,
+     "3": 10
+    },
+    "target_classes": [
+     4
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 60,
+    "experience_index": 2,
+    "historical_total": 40,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10,
+     "2": 10,
+     "3": 10
+    },
+    "target_classes": [
+     5
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 60,
+    "experience_index": 2,
+    "historical_total": 40,
+    "kind": "refresh",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10,
+     "2": 10,
+     "3": 10
+    },
+    "target_classes": [
+     0
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 60,
+    "experience_index": 2,
+    "historical_total": 40,
+    "kind": "refresh",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10,
+     "2": 10,
+     "3": 10
+    },
+    "target_classes": [
+     1
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 60,
+    "experience_index": 2,
+    "historical_total": 40,
+    "kind": "refresh",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10,
+     "2": 10,
+     "3": 10
+    },
+    "target_classes": [
+     2
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 60,
+    "experience_index": 2,
+    "historical_total": 40,
+    "kind": "refresh",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10,
+     "2": 10,
+     "3": 10
+    },
+    "target_classes": [
+     3
+    ]
+   }
+  ],
+  "raw_mean_final_accuracy": 0.49583333333333335,
+  "skills": {
+   "0": [
+    0
+   ],
+   "1": [
+    1
+   ],
+   "2": [
+    2
+   ],
+   "3": [
+    3
+   ],
+   "4": [
+    4
+   ],
+   "5": [
+    5
+   ]
+  },
+  "state_checksum": {
+   "0": 21.711349272169173,
+   "1": 21.76954431226477,
+   "2": 21.89956112438813,
+   "3": 21.982051101513207,
+   "4": 21.982560032978654,
+   "5": 21.808499546255916
+  }
+ },
+ "refresh_k3": {
+  "decisions": {
+   "0": {
+    "0": [
+     "scratch",
+     0
+    ],
+    "1": [
+     "scratch",
+     1
+    ]
+   },
+   "1": {
+    "2": [
+     "scratch",
+     2
+    ],
+    "3": [
+     "scratch",
+     3
+    ]
+   },
+   "2": {
+    "4": [
+     "scratch",
+     4
+    ],
+    "5": [
+     "scratch",
+     5
+    ]
+   }
+  },
+  "final_class_accuracy": {
+   "0": 0.0,
+   "1": 0.0,
+   "2": 0.425,
+   "3": 0.0,
+   "4": 1.0,
+   "5": 1.0
+  },
+  "mean_final_accuracy": 0.4041666666666666,
+  "mean_final_loss": 3.049817238763595,
+  "provenance": [
+   {
+    "current": {
+     "0": 10,
+     "1": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 0,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     0
+    ]
+   },
+   {
+    "current": {
+     "0": 10,
+     "1": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 0,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     1
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 26,
+    "experience_index": 1,
+    "historical_total": 6,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3
+    },
+    "target_classes": [
+     2
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 26,
+    "experience_index": 1,
+    "historical_total": 6,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3
+    },
+    "target_classes": [
+     3
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 26,
+    "experience_index": 1,
+    "historical_total": 6,
+    "kind": "refresh",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3
+    },
+    "target_classes": [
+     0
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 26,
+    "experience_index": 1,
+    "historical_total": 6,
+    "kind": "refresh",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3
+    },
+    "target_classes": [
+     1
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 32,
+    "experience_index": 2,
+    "historical_total": 12,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3,
+     "2": 3,
+     "3": 3
+    },
+    "target_classes": [
+     4
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 32,
+    "experience_index": 2,
+    "historical_total": 12,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3,
+     "2": 3,
+     "3": 3
+    },
+    "target_classes": [
+     5
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 32,
+    "experience_index": 2,
+    "historical_total": 12,
+    "kind": "refresh",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3,
+     "2": 3,
+     "3": 3
+    },
+    "target_classes": [
+     0
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 32,
+    "experience_index": 2,
+    "historical_total": 12,
+    "kind": "refresh",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3,
+     "2": 3,
+     "3": 3
+    },
+    "target_classes": [
+     1
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 32,
+    "experience_index": 2,
+    "historical_total": 12,
+    "kind": "refresh",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3,
+     "2": 3,
+     "3": 3
+    },
+    "target_classes": [
+     2
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 32,
+    "experience_index": 2,
+    "historical_total": 12,
+    "kind": "refresh",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3,
+     "2": 3,
+     "3": 3
+    },
+    "target_classes": [
+     3
+    ]
+   }
+  ],
+  "raw_mean_final_accuracy": 0.5,
+  "skills": {
+   "0": [
+    0
+   ],
+   "1": [
+    1
+   ],
+   "2": [
+    2
+   ],
+   "3": [
+    3
+   ],
+   "4": [
+    4
+   ],
+   "5": [
+    5
+   ]
+  },
+  "state_checksum": {
+   "0": 21.679946743883193,
+   "1": 21.722486319369636,
+   "2": 21.948007042054087,
+   "3": 21.908565212972462,
+   "4": 22.001754550263286,
+   "5": 21.796121137216687
+  }
+ },
+ "replay": {
+  "decisions": {
+   "0": {
+    "0": [
+     "scratch",
+     0
+    ],
+    "1": [
+     "scratch",
+     1
+    ]
+   },
+   "1": {
+    "2": [
+     "scratch",
+     2
+    ],
+    "3": [
+     "scratch",
+     3
+    ]
+   },
+   "2": {
+    "4": [
+     "scratch",
+     4
+    ],
+    "5": [
+     "scratch",
+     5
+    ]
+   }
+  },
+  "final_class_accuracy": {
+   "0": 0.875,
+   "1": 0.025,
+   "2": 0.05,
+   "3": 0.0,
+   "4": 0.025,
+   "5": 0.0
+  },
+  "mean_final_accuracy": 0.1625,
+  "mean_final_loss": 5.003955646355947,
+  "provenance": [
+   {
+    "current": {
+     "0": 10,
+     "1": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 0,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     0
+    ]
+   },
+   {
+    "current": {
+     "0": 10,
+     "1": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 0,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     1
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 40,
+    "experience_index": 1,
+    "historical_total": 20,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10
+    },
+    "target_classes": [
+     2
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 40,
+    "experience_index": 1,
+    "historical_total": 20,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10
+    },
+    "target_classes": [
+     3
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 60,
+    "experience_index": 2,
+    "historical_total": 40,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10,
+     "2": 10,
+     "3": 10
+    },
+    "target_classes": [
+     4
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 60,
+    "experience_index": 2,
+    "historical_total": 40,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 10,
+     "1": 10,
+     "2": 10,
+     "3": 10
+    },
+    "target_classes": [
+     5
+    ]
+   }
+  ],
+  "raw_mean_final_accuracy": 0.42916666666666664,
+  "skills": {
+   "0": [
+    0
+   ],
+   "1": [
+    1
+   ],
+   "2": [
+    2
+   ],
+   "3": [
+    3
+   ],
+   "4": [
+    4
+   ],
+   "5": [
+    5
+   ]
+  },
+  "state_checksum": {
+   "0": 21.76756029482931,
+   "1": 21.858070042915642,
+   "2": 21.899115161038935,
+   "3": 21.917358438833617,
+   "4": 21.982560032978654,
+   "5": 21.808499546255916
+  }
+ },
+ "replay_k3": {
+  "decisions": {
+   "0": {
+    "0": [
+     "scratch",
+     0
+    ],
+    "1": [
+     "scratch",
+     1
+    ]
+   },
+   "1": {
+    "2": [
+     "scratch",
+     2
+    ],
+    "3": [
+     "scratch",
+     3
+    ]
+   },
+   "2": {
+    "4": [
+     "scratch",
+     4
+    ],
+    "5": [
+     "scratch",
+     5
+    ]
+   }
+  },
+  "final_class_accuracy": {
+   "0": 0.775,
+   "1": 0.0,
+   "2": 0.05,
+   "3": 0.0,
+   "4": 0.075,
+   "5": 0.0
+  },
+  "mean_final_accuracy": 0.15,
+  "mean_final_loss": 5.0095059434572855,
+  "provenance": [
+   {
+    "current": {
+     "0": 10,
+     "1": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 0,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     0
+    ]
+   },
+   {
+    "current": {
+     "0": 10,
+     "1": 10
+    },
+    "dataset_size": 20,
+    "experience_index": 0,
+    "historical_total": 0,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {},
+    "target_classes": [
+     1
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 26,
+    "experience_index": 1,
+    "historical_total": 6,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3
+    },
+    "target_classes": [
+     2
+    ]
+   },
+   {
+    "current": {
+     "2": 10,
+     "3": 10
+    },
+    "dataset_size": 26,
+    "experience_index": 1,
+    "historical_total": 6,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3
+    },
+    "target_classes": [
+     3
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 32,
+    "experience_index": 2,
+    "historical_total": 12,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3,
+     "2": 3,
+     "3": 3
+    },
+    "target_classes": [
+     4
+    ]
+   },
+   {
+    "current": {
+     "4": 10,
+     "5": 10
+    },
+    "dataset_size": 32,
+    "experience_index": 2,
+    "historical_total": 12,
+    "kind": "class",
+    "offline_pool": {},
+    "optimizer_steps": 2,
+    "retained": {
+     "0": 3,
+     "1": 3,
+     "2": 3,
+     "3": 3
+    },
+    "target_classes": [
+     5
+    ]
+   }
+  ],
+  "raw_mean_final_accuracy": 0.475,
+  "skills": {
+   "0": [
+    0
+   ],
+   "1": [
+    1
+   ],
+   "2": [
+    2
+   ],
+   "3": [
+    3
+   ],
+   "4": [
+    4
+   ],
+   "5": [
+    5
+   ]
+  },
+  "state_checksum": {
+   "0": 21.76756029482931,
+   "1": 21.858070042915642,
+   "2": 21.95967877469957,
+   "3": 21.83495673071593,
+   "4": 22.001754550263286,
+   "5": 21.796121137216687
+  }
+ }
+}

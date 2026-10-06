@@ -20,6 +20,12 @@ from dataclasses import dataclass
 
 from torch import Tensor
 
+#: Metadata key under which a skill stores its **calibration hold-out**:
+#: ``{class_id: (inputs, targets)}`` examples that were excluded from training
+#: and are used *only* to fit the verifier's Platt calibration. They are not
+#: replay data and are never trained on.
+CALIBRATION_EXAMPLES_KEY = "calibration_examples_by_class"
+
 
 class SkillMemory:
     """Bounded, index-addressed storage for independent skill snapshots."""
@@ -85,7 +91,6 @@ class ClassRecord:
     decision: str
     skill: int
     new_score: float = 0.0
-    old_score: float = 0.0
     old_accuracy: float = 0.0
     new_accuracy: float = 0.0
 
@@ -129,20 +134,6 @@ class ExperienceClassMap:
         self._by_experience[record.experience_index][record.class_id] = record
         self._class_to_skill[record.class_id] = record.skill
         self._by_skill.setdefault(record.skill, set()).add(record.class_id)
-
-    def classes_for_experience(self, experience_index: int) -> dict[int, ClassRecord]:
-        """Return `{class_id: ClassRecord}` for every class seen in this experience."""
-        return dict(self._by_experience.get(experience_index, {}))
-
-    def skill_for_class(self, experience_index: int, class_id: int) -> int | None:
-        """Return the skill assigned to `class_id` within `experience_index`.
-
-        `None` if that (experience, class) pair was never recorded. Unlike
-        `find_skill_for_class_anywhere`, this does not search other
-        experiences.
-        """
-        record = self._by_experience.get(experience_index, {}).get(class_id)
-        return record.skill if record else None
 
     def find_skill_for_class_anywhere(self, class_id: int) -> int | None:
         """Return the canonical skill for `class_id`, searching all experiences."""

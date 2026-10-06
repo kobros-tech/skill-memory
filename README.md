@@ -1,373 +1,225 @@
 # Skill Memory
 
-**Skill Memory** is a class-incremental continual-learning strategy for
-[Avalanche](https://avalanche.continualai.org/) that answers a simple
-question directly, instead of hoping a single shared model answers it
-implicitly: _when I meet a new class, should the network reuse an
-existing skill, or does this class need one of its own?_
+Continual learning on [Avalanche](https://avalanche.continualai.org/) with **one
+YES/NO verifier ("skill") per group of classes**. For every new class the
+strategy decides, by numerically probing the stored skills, whether an existing
+skill can absorb it (**REUSE**) or a new one is needed (**SCRATCH**), trains a
+binary verifier under a chosen `update_mode`, and evaluates anonymously from the
+stored skills alone -- no labels, no task id, no extra evaluator network.
 
-It does this by keeping one **stored weight snapshot per skill**,
-probing candidates numerically before committing to either choice, and
-evaluating the result with an evaluator that is architecturally
-independent of the strategy under test — so a passing score can't be an
-artifact of the thing being measured.
+Every formula the code implements is written out in
+[`docs/MATHEMATICS.md`](docs/MATHEMATICS.md).
 
-- [Why](#why)
-- [How it decides: reuse vs. scratch](#how-it-decides-reuse-vs-scratch)
-- [Two ways to measure it](#two-ways-to-measure-it)
-- [Anonymous routing](#anonymous-routing-no-task-id-no-label)
-- [Package layout](#package-layout)
-- [Installation](#installation)
-- [Quickstart](#quickstart)
-- [Running the SplitMNIST demo](#running-the-splitmnist-demo)
-- [Performance: functional probing, and where the time goes](#performance-functional-probing-and-where-the-time-goes)
-- [Diagnostics and the `diagnose` contract](#diagnostics-and-the-diagnose-contract)
-- [Development](#development)
-- [Design invariants](#design-invariants)
-- [License](#license)
+- [Install](#install) · [Quick start](#quick-start) · [Update modes](#update-modes)
+- [Parameters and what works with what](#parameters-and-what-works-with-what)
+- [How it is evaluated](#how-it-is-evaluated) · [Diagnostics](#diagnostics)
+- [Demos and reference results](#demos-and-reference-results)
+- [Layout](#layout) · [Development](#development)
 
-## Why
-
-Class-incremental continual learning usually asks one network to keep
-absorbing new classes without forgetting old ones, then measures success
-after the fact with accuracy curves. Skill Memory instead makes the
-reuse-or-specialize choice an explicit, numerically justified decision at
-the moment a new class arrives, and keeps whichever skill a class ends up
-assigned to **frozen** for the rest of training — so a later class can
-never silently overwrite an earlier one's weights.
-
-## How it decides: reuse vs. scratch
-
-When class $c$ first appears, [`skill_memory.cl.decision`](skill_memory/cl/decision.py)
-scores every existing skill $s$ against it without training anything. For a
-probe batch $(x, y)$ of $c$'s own examples, it loads skill $s$'s frozen
-weights, grows the classifier head just far enough to have a column for
-$c$ (Avalanche's own `IncrementalClassifier.adaptation`, so a genuinely new
-class always starts from a freshly initialized column), and reads off:
-
-$$
-\text{new\_score}_s = \frac{1}{N}\sum_{i=1}^{N} \operatorname{softmax}(f_{\theta_s}(x_i))_{y_i},
-\qquad
-\text{new\_accuracy}_s = \frac{1}{N}\sum_{i=1}^{N} \mathbb{1}\!\left[\arg\max_k f_{\theta_s}(x_i)_k = y_i\right]
-$$
-
-The same measurement, run on skill $s$'s own already-mastered classes
-$c' \in \text{owned}(s)$, gives the _safety_ side of the decision — the
-**worst** old class, not the average, so one quietly forgotten class can't
-hide behind the others:
-
-$$
-\text{old\_accuracy}_s = \min_{c' \in \text{owned}(s)} \frac{1}{N}\sum_{i=1}^{N}
-\mathbb{1}\!\left[\arg\max_k f_{\theta_s}(x_i')_k = y_i'\right]
-$$
-
-A skill only becomes a reuse candidate once every one of its old classes
-stays above a chance-relative margin, and its new-class fit clears an
-absolute floor:
-
-$$
-\text{old\_accuracy}_s > \text{chance}_s + \delta
-\qquad\text{and}\qquad
-\text{new\_score}_s > \tau
-$$
-
-with $\text{chance}_s = 1 / |\text{classifier width of } s|$, forgetting
-margin $\delta$ (default $0.05$), and score floor $\tau$ (default $0.9$).
-Among the skills that pass, the strongest candidates on `new_score` _and_
-on `new_accuracy` are found independently by looking for the largest gap
-in each sorted ranking (`_strongest_candidates`, not just "above the
-floor") — the class is only reused if the two rankings agree on the same
-skill; otherwise a fresh skill is trained from scratch. See
-[`find_best_skill`](skill_memory/cl/decision.py) for the exact rule and
-[`skill_memory/tests/test_decision.py`](skill_memory/tests/test_decision.py)
-for worked cases.
-
-## Two ways to measure it
-
-**Production evaluation is always the independent ML evaluator**
-([`skill_memory.evaluation.independent_evaluator`](skill_memory/evaluation/independent_evaluator.py)):
-a _separate_ model, trained only on a small held-out memory of past
-examples, whose job is exactly what a real deployment needs — take an
-input with no class-identity hint and produce a class prediction. It
-never sees which skill a sample "should" route to; it only sees pixels
-in, a class out. Its accuracy is what `strategy.eval()` reports, and
-`--eval-routing probe` lets the evaluator _also_ route to a specific
-skill's own frozen weights when it's confident, purely to check whether
-skill-specific weights sharpen the shared model's prediction.
-
-**Everything in the [`skill_memory.diagnostics`](skill_memory/diagnostics/)
-package is opt-in, never runs inside `strategy.eval()`, and refuses to run
-at all unless you pass `diagnose=True` (see
-[Diagnostics and the `diagnose` contract](#diagnostics-and-the-diagnose-contract)).** It exists to answer a
-different, diagnostic question: _could Skill Memory's own stored skills,
-without any evaluator at all, reproduce that accuracy?_
-
-- `evaluate_class_oracle` routes each sample using its **true label** —
-  an upper bound that presupposes knowing the answer already.
-- `evaluate_skill_memory(..., routing="probe")` routes anonymously with
-  `find_best_routing_skill` (below) — no evaluator, no label, no task id.
-- `diagnose_evaluator_probe` checks the evaluator's own routing decisions
-  against the true owning skill, independent of whether the resulting
-  class prediction was right.
-
-Keeping these separate means a strong number from `strategy.eval()` can
-never be quietly explained by peeking at ground truth.
-
-## Anonymous routing (no task id, no label)
-
-`find_best_routing_skill` (in [`skill_memory/diagnostics/routing.py`](skill_memory/diagnostics/routing.py))
-picks one skill per sample using only _that skill's own_ raw response at
-_its own_ owned class columns — no shared evaluator, no learned router.
-For skill $s$'s raw logits $z_s \in \mathbb{R}^{N \times C_s}$ on owned
-classes $\text{owned}(s)$:
-
-$$
-\text{score}_s =
-\begin{cases}
-0 & \text{owned}(s) = \varnothing \\[4pt]
-\sigma(z_{s,0}) & C_s = 1 \text{ (a genuine single-class head — softmax over one column is always 1 and uninformative)} \\[4pt]
-\displaystyle\sum_{c \in \text{owned}(s)} \operatorname{softmax}(z_s)_c & \text{otherwise}
-\end{cases}
-$$
-
-Scores are stacked across all $S$ skills and turned into a routing
-distribution with a temperature $T$ (default $1$, sharper as $T \to 0$,
-uniform fallback if every skill scores $0$):
-
-$$
-p(s \mid x) = \frac{\text{score}_s^{1/T}}{\sum_{s'=1}^{S} \text{score}_{s'}^{1/T}}
-$$
-
-The routed skill is $\arg\max_s p(s \mid x)$; `confidence_gap` is the
-margin between the top two entries of $p(\cdot \mid x)$. The persistent,
-long-running version of this same idea —
-[`PersistentFingerprintSkillMemoryPlugin`](skill_memory/evaluation/fingerprint_routing.py)
-— caches each skill's fingerprint and only recomputes it when
-[`global_fingerprint_refresh`](skill_memory/evaluation/global_fingerprint_refresh.py)
-detects drift, and can optionally reconstruct a class's decision boundary
-directly from a skill's stored _weights_ rather than from probe forward
-passes — see
-[`reverse_engineer_scores_from_weights`](skill_memory/evaluation/behavior.py)
-and [`NormalMLReverseEngineer`](skill_memory/evaluation/reverse_engineering.py).
-
-## Package layout
-
-```
-skill_memory/
-├── strategy.py                  # SkillMemoryStrategy: the public Avalanche-facing API
-├── diagnostics/                   # ALL diagnostic code; every function needs diagnose=True
-│   ├── routing.py                 # find_best_routing_skill, route_probe_logits
-│   ├── evaluation.py              # evaluate_class_oracle, evaluate_skill_memory, diagnose_evaluator_probe
-│   ├── alignment.py               # routing_rank_diagnostics, class_index_alignment_report
-│   ├── timing.py                  # TimingAccumulator, timing_report, reset_timing
-│   └── _gate.py                   # require_diagnose: the one shared enforcement point
-├── cl/                            # Skill Memory itself: what to freeze, when, and why
-│   ├── skill_registry.py         # SkillMemory (frozen state store) + ExperienceClassMap (bookkeeping)
-│   ├── decision.py                # The reuse-vs-scratch probing/decision policy (math above)
-│   ├── training.py                # Scratch-trains one class's classifier column
-│   ├── skill_memory_plugin.py    # Avalanche plugin wiring decision.py into the training loop
-│   └── persistent_skill_memory_plugin.py  # Long-running variant with cached anonymous routing
-├── evaluation/                    # Everything about *measuring* the strategy
-│   ├── independent_evaluator.py  # The independent ML evaluator (production eval)
-│   ├── routing.py                 # Shared routing math: score_skill_compatibility, select_skill_from_scores
-│   ├── behavior.py                 # Per-class behavior fingerprints; reverse-engineering from weights
-│   ├── reverse_engineering.py     # NormalMLReverseEngineer: learned weight -> decision reconstruction
-│   ├── fingerprint_routing.py     # PersistentFingerprintSkillMemoryPlugin (cached anonymous routing)
-│   └── global_fingerprint_refresh.py  # Drift detection that triggers a fingerprint recompute
-├── utils/
-│   └── probing.py                 # Dataset probing, exact state application, IncrementalClassifier helpers
-├── demos/
-│   └── demo_splitmnist.py  # End-to-end SplitMNIST example (see below)
-└── tests/                          # 96 tests; see "Development"
-```
-
-## Installation
-
-Requires Python ≥3.10. From a clone of this repository:
+## Install
 
 ```bash
-pip install -e .
-pip install -r requirements-dev.txt   # for tests, ruff, pre-commit
+pip install -e ".[dev]"      # Python >= 3.10, torch >= 2.0, avalanche-lib
 ```
 
-`pyproject.toml` declares `torch`, `avalanche-lib`, and `numpy` as runtime
-dependencies; nothing else is required to import `skill_memory`.
-
-## Quickstart
+## Quick start
 
 ```python
 import torch
-from avalanche.benchmarks import nc_benchmark
 from avalanche.models import SimpleMLP
-
 from skill_memory import SkillMemoryStrategy
 
-# Any classification dataset works; this sketch omits loading one.
-benchmark = nc_benchmark(
-    train_dataset,
-    test_dataset,
-    n_experiences=5,
-    task_labels=False,
-    seed=0,
-)
-
-model = SimpleMLP(input_size=28 * 28, num_classes=10)
+model = SimpleMLP(num_classes=10)
 strategy = SkillMemoryStrategy(
     model=model,
     optimizer=torch.optim.SGD(model.parameters(), lr=0.01),
     criterion=torch.nn.CrossEntropyLoss(),
-    evaluator_model_factory=lambda: SimpleMLP(input_size=28 * 28, num_classes=10),
-    eval_memory_per_class=20,
-    eval_epochs=1,
-    train_mb_size=64,
-    train_epochs=1,
-    eval_mb_size=64,
+    update_mode="replay",  # new_class | replay | refresh
+    memory_per_class=20,
+    seed=0,
 )
-
-for experience in benchmark.train_stream:
+for experience in benchmark.train_stream:  # any Avalanche class-incremental benchmark
     strategy.train(experience)
-    results = strategy.eval(benchmark.test_stream)
-    print(results["mean_final_accuracy"])
+results = strategy.eval(benchmark.test_stream)
+print(results["raw_mean_final_accuracy"], results["mean_final_accuracy"])
 ```
 
-`strategy.eval()` always reports the independent evaluator's accuracy.
-To additionally check Skill Memory's own stored skills:
+Binary one-vs-rest training learns "this class vs. the rest", so **the first
+experience needs at least two classes** (or later ones must replay history).
 
-```python
-from skill_memory.diagnostics import evaluate_class_oracle, evaluate_skill_memory
+## Update modes
 
-oracle = evaluate_class_oracle(
-    strategy.model,
-    strategy.skill_memory_plugin,
-    benchmark.test_stream,
-    up_to_index=len(benchmark.test_stream) - 1,
-    num_classes=10,
-    batch_size=64,
-    device=strategy.device,
-    diagnose=True,  # required: this uses true labels to route
-)
-probe = evaluate_skill_memory(
-    strategy.model,
-    strategy.skill_memory_plugin,
-    benchmark.test_stream,
-    up_to_index=len(benchmark.test_stream) - 1,
-    num_classes=10,
-    routing="probe",
-    batch_size=64,
-    device=strategy.device,
-    diagnose=True,
-)
-```
+`update_mode` is one complete training policy. Skills are verifiers trained on
+the *current* data plus, depending on the mode, *retained* history (a bounded
+per-class replay memory of `memory_per_class` frozen examples).
 
-## Running the SplitMNIST demo
+| `update_mode` | history used for each new class | existing skills |
+|---|---|---|
+| `new_class` | none | frozen |
+| `replay` | all retained examples of every old class, or `replay_samples_per_class` of them | frozen |
+| `refresh` | same as `replay` | each retrained once per experience on the enlarged domain |
+
+`replay` means *all currently retained history*, not *all historical training
+data* -- the memory is bounded. `refresh` is the most accurate and by far the
+most expensive: it adds one training pass per existing skill per experience
+(quadratic in the number of experiences, see
+[`MATHEMATICS.md` §6](docs/MATHEMATICS.md)).
+
+The 3-experience Split-CIFAR-100 run below (seed 3, 50 examples/class, 10 epochs)
+shows the trade-off; times are from one laptop CPU and only their ratios matter:
+
+| `update_mode` | calibrated acc. | raw acc. | forgetting | class training | refresh |
+|---|---|---|---|---|---|
+| `new_class` | 0.267 | 0.225 | 0.107 | 453 s | -- |
+| `replay` | 0.291 | 0.233 | 0.083 | 706 s | -- |
+| `refresh` | 0.329 | 0.340 | 0.176 | 1615 s | 1389 s |
+
+## Parameters and what works with what
+
+All parameters are keyword-only. Groups:
+
+| Group | Parameters |
+|---|---|
+| **policy** | `update_mode`, `replay_samples_per_class` |
+| **data** | `memory_per_class` (replay memory), `train_samples_per_class` (current examples/class, default `memory_per_class`), `validation_fraction` (calibration hold-out), `class_train_epochs`, `train_mb_size` |
+| **decision** | `max_skills`, `forgetting_margin`, `score_floor`, `probe_batch_size`, `probe_batches`, `max_safety_candidates`, `force_decision`, `reuse_is_mutable`, `batch_stage1`, `stage1_chunk_size` |
+| **run** | `seed`, `memory_seed`, `device`, `verbose`, `diagnose`, `strict_protocol`, `eval_mb_size`, `eval_chunk_size` |
+
+**Rules checked at construction** (a violation raises `ValueError`):
+
+| Combination | Why |
+|---|---|
+| `replay_samples_per_class` with `update_mode="new_class"` | no history is replayed |
+| `replay_samples_per_class > memory_per_class` | cannot replay more than is retained |
+| `update_mode="refresh"` with `reuse_is_mutable=False` | refresh edits stored skills |
+| `stage1_chunk_size` without `batch_stage1=True` | the chunk only exists in the batched path |
+| `validation_fraction` outside `[0, 1)` | `0` is allowed and means "no calibration" |
+
+**Silently inert** (documented, not errors): with `force_decision` set, probing
+never runs, so `forgetting_margin`, `score_floor`, `probe_batch_size`,
+`probe_batches`, `max_safety_candidates` and `batch_stage1` have no effect.
+`diagnose` and `verbose` never change results. `batch_stage1` / `eval_chunk_size`
+change speed only, never decisions or predictions.
+
+**Seeds.** `seed` drives everything stochastic (probe batches, calibration
+hold-out, replay selection, mini-batch order, balanced re-sampling, dropout)
+through explicit generators, so equal seeds give bit-identical stored skills
+whatever the global RNG state. `memory_seed` alone decides *which* examples the
+replay memory retains and defaults to `0`, keeping that memory identical across
+experiment seeds.
+
+## How it is evaluated
+
+`strategy.eval()` uses [`CLEvaluationPlugin`](skill_memory/evaluation/cl_evaluator.py)
+and nothing else. At prediction time only `x` is available: each trained class
+$c$ is scored by the verifier of the skill that owns it and
+
+$$
+\hat y_{\rm raw}(x)=\arg\max_c r_c(x),\qquad
+\hat y_{\rm cal}(x)=\arg\max_c\,(a_c\,r_c(x)+b_c),
+$$
+
+where $(a_c, b_c)$ is a monotone Platt calibration fitted on the skill's
+held-out calibration examples. Test labels are used only *after* prediction, to
+count correct answers. Two accuracies are reported: `raw_mean_final_accuracy`
+(**the primary diagnostic**) and `mean_final_accuracy` (calibrated). Classes with
+no skill yet score a constant, so evaluating a stream that contains future
+classes is safe. The leakage guards (`strict_protocol=True`) raise if a training
+step touches a test-stream experience or evaluation touches a train-stream one.
+
+## Diagnostics
+
+Opt-in tools in [`skill_memory.diagnostics`](skill_memory/diagnostics/), never part
+of `strategy.eval()`; each takes a required `diagnose=True` so they cannot run by
+accident (`timing_report` needs a strategy built with `diagnose=True`).
+
+| Function | Answers |
+|---|---|
+| `evaluate_class_oracle` | upper bound, routing every sample with its TRUE label |
+| `evaluate_skill_memory(routing="probe")` | anonymous probe routing over the stored skills |
+| `replay_provenance_report` | which historical data did every training call use? Lists any violation of the update-mode invariants |
+| `timing_report` | where did the time go: decision probing / class training / refresh / evaluation |
+| `audit_split_overlap`, `audit_strategy_leakage` | exact-content train/test overlap (a diagnostic, not a proof of no leakage) |
+
+## Demos and reference results
+
+All demos live in `skill_memory/demos/` and print the same report.
 
 ```bash
-python -m skill_memory.demos.demo_splitmnist --n-experiences 5 --train-epochs 1
+# Real data (download the dataset): the published CIFAR-100 configuration
+python -m skill_memory.demos.demo_cifar100 --n-experiences 20 --max-experiences 3 \
+    --update-mode replay --memory-per-class 50 --train-samples-per-class 50 \
+    --class-train-epochs 10 --seed 3 --diagnose
+python -m skill_memory.demos.demo_splitmnist --update-mode refresh --diagnose
+
+# Offline, seconds: one-factor-at-a-time comparison of the update policies
+python -m skill_memory.demos.demo_replay_ablation --seeds 0 1 2 --json out.json
+
+# Where can time be saved? Measures stage 1 of the decision (see below)
+python -m skill_memory.demos.demo_stage1_timing --model resnet --n-skills 25 50 100
 ```
 
-Key flags (`python -m skill_memory.demos.demo_splitmnist --help` for
-the rest): `--eval-routing {none,probe}` (evaluator-only vs. evaluator +
-skill-probe routing at evaluation time), `--diagnose` (also run the opt-in
-class-oracle and anonymous-probe diagnostics above; never affects the
-reported evaluator accuracy), `--eval-memory-per-class`, `--eval-epochs`,
-`--probe-behavior-weight`, `--max-skills`.
+`--diagnose` adds the oracle/probe accuracies, per-stage timing and the replay
+audit (`violations: none` is expected). To compare policies, vary **only**
+`--update-mode` (and `--replay-samples-per-class`); data, initial weights and
+seeds then stay identical.
+
+### Finding the time-optimal configuration
+
+`timing_report` splits a run into decision probing, class training, refresh and
+evaluation. Class training and refresh dominate with `refresh`; the decision
+cost is the only part that grows with the number of *stored skills* (it probes
+every skill for every new class), and `batch_stage1=True` can reduce it by
+batching those probes with `torch.vmap`. Whether it helps depends on the
+hardware, so measure it:
+
+```bash
+python -m skill_memory.demos.demo_stage1_timing --model resnet --device cuda \
+    --n-skills 25 50 100 --chunk-size 8 16 32
+```
+
+The table lists the speedup per skill count and chunk size, and the last block
+recommends `batch_stage1=True, stage1_chunk_size=N` only where the speedup
+reaches 1.1x. On CPU it usually does not, which is why the default is `False`.
+Other levers, all result-preserving: lower `max_safety_candidates` (default 5,
+approximate), `replay_samples_per_class` (fewer replayed examples), and
+`eval_chunk_size`.
+
+## Layout
+
+```
+skill_memory/
+  strategy.py              SkillMemoryStrategy (Avalanche strategy; wires the two plugins)
+  cl/
+    skill_memory_plugin.py SkillMemoryPlugin: REUSE/SCRATCH, training, replay memory, refresh
+    decision.py            functional probing: stage 1 (fit) + stage 2 (safety) + selection
+    training.py            binary class training, skill refresh, provenance, seeding
+    replay.py              update_mode policy, replay memory, deterministic selection
+    skill_registry.py      SkillMemory (stored states), class -> skill bookkeeping
+  evaluation/cl_evaluator.py   CLEvaluationPlugin: stored-skill scoring + Platt calibration
+  diagnostics/             opt-in oracle / probe / audit / timing tools
+  utils/                   probing.py (functional_call, caches, batching), protocol_guard.py
+  demos/                   cifar100, splitmnist, replay_ablation, stage1_timing (+ _common)
+  tests/                   offline tests (no dataset download)
+docs/MATHEMATICS.md        formulas, cost model, reproducibility, compatibility rules
+```
+
+Contributor notes on invariants are in [`skill_memory/README.md`](skill_memory/README.md).
 
 ## Development
 
 ```bash
-pre-commit install        # run automatically on every commit
-pre-commit run --all-files
-pytest skill_memory/tests -q
+pytest -q          # offline; ~20 s
+ruff check . && ruff format --check .
 ```
 
-`pre-commit` runs `ruff` (lint + format) and `insert-license`, which adds
-the two-line copyright/SPDX header from `LICENSE-HEADER.txt` to the top of
-any Python file that doesn't already have one — new files get it
-automatically on first commit, so it never needs to be added by hand.
-
-## Performance: functional probing, and where the time goes
-
-Probing many stored skills against the same class batch (the loop inside
-`score_class_against_skills`, and the equivalent per-eval-batch routing
-in `MLEvaluationPlugin.after_eval_forward`) never mutates a model to
-switch skills. `evaluate_state` and `predict_logits`
-([`utils/probing.py`](skill_memory/utils/probing.py)) apply each skill's
-frozen weights with `torch.func.functional_call` instead of
-`load_state_dict`, so trying $S$ skills costs one forward pass each, not
-$S$ full parameter copies plus a restore. (`SkillMemoryPlugin`'s own
-apply-and-train paths still use the mutating
-`apply_skill_state_exact` — that's a real, persistent state change, not a
-disposable probe.)
-
-To see where wall-clock time is actually going in your own run, rather
-than guessing, build the strategy with `diagnose=True` (timing is never
-recorded otherwise — see below):
-
-```python
-from skill_memory.diagnostics import timing_report
-
-strategy = SkillMemoryStrategy(..., diagnose=True)
-# after some strategy.train(...) / strategy.eval(...) calls:
-print(timing_report(strategy))
-# {
-#   "skill_memory_decision_probing": {"total_seconds": ..., "calls": ..., "mean_seconds": ...},
-#   "skill_memory_class_training": {"total_seconds": ..., "calls": ..., "mean_seconds": ...},
-#   "independent_evaluator_and_test_evaluation": {"total_seconds": ..., "calls": ..., "mean_seconds": ...},
-# }
-```
-
-`reset_timing(strategy)` clears all three buckets, e.g. to isolate one
-experience's timing from the run as a whole.
-
-## Diagnostics and the `diagnose` contract
-
-Production code and diagnostic code are kept structurally apart, so it is
-auditable — not just promised — that nothing diagnostic can reach a
-production number.
-
-- **One package.** Every diagnostic lives in
-  [`skill_memory/diagnostics/`](skill_memory/diagnostics/). Nothing in it
-  is importable from the bare `skill_memory` namespace — you have to
-  write `from skill_memory.diagnostics import ...` on purpose.
-- **A required flag, not a default.** `find_best_routing_skill`,
-  `route_probe_logits`, `evaluate_skill_memory`, `evaluate_class_oracle`,
-  `diagnose_evaluator_probe`, `routing_rank_diagnostics` and
-  `class_index_alignment_report` all take `diagnose` as a required
-  keyword-only argument with **no default**. Leaving it out is a
-  `TypeError`; passing `diagnose=False` is a `RuntimeError`. Anything that
-  could use a true label (oracle routing) or costs real forward passes
-  therefore can't run by accident, whatever the strategy was configured
-  with.
-- **Zero cost when off.** `SkillMemoryStrategy(diagnose=False)` (the
-  default) makes every internal `self.timing.track(...)` a true no-op — it
-  doesn't even call `time.perf_counter()`. `timing_report`/`reset_timing`
-  need a strategy built with `diagnose=True` and say so clearly otherwise.
-- **Enforced by tests.**
-  [`tests/test_diagnostics_gate.py`](skill_memory/tests/test_diagnostics_gate.py)
-  checks the signatures, the refusals, that no diagnostic name leaks into
-  the top-level package, and — by parsing every production module's
-  imports — that only the two files that own a `TimingAccumulator` and the
-  one plugin that already gated its own reports on `diagnose` import from
-  `skill_memory.diagnostics` at all.
-
-To audit a codebase built on this package: grep for `diagnose=True`. Every
-match is a place where ground truth or diagnostic cost could enter.
-
-## Design invariants
-
-- **One canonical skill per class, for the strategy's whole lifetime.**
-  Once `ExperienceClassMap` records which skill owns a class, that mapping
-  never changes; a class is never silently reassigned to a different
-  skill later (see [`skill_registry.py`](skill_memory/cl/skill_registry.py)).
-- **A skill's weights are frozen the moment it stops being trained.**
-  Nothing outside `cl/training.py`'s scratch-training pass and the
-  probing in `decision.py` (which applies stored weights functionally via
-  `torch.func.functional_call`, so it never mutates — or needs a copy of —
-  the live model) ever calls `.backward()` using a stored skill's weights.
-- **Diagnostics never leak into production metrics.** Everything in
-  `skill_memory.diagnostics` requires an explicit `diagnose=True` at the
-  call site and is absent from `strategy.eval()`'s return value.
+`tests/test_golden_regression.py` pins the engine to the validated reference
+(provenance, decisions, stored weights, accuracies for all update policies): if
+it fails, a change altered *what is computed*, not just how it is organised.
+`pytest.yml` runs lint, the suite on Python 3.10-3.12 plus an older-torch job
+(torch 2.3, installed together with the package so the resolver sees all pins),
+and the offline ablation demo.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE). Copyright (c) 2026 Kobros-Tech Ltd.
+MIT, see `LICENSE`.

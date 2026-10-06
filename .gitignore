@@ -14,3 +14,6 @@ dist/
 logs/
 data/
 *.csv
+
+!skill_memory/tests/data/
+!skill_memory/tests/data/golden_v3.json
